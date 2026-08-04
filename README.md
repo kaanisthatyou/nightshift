@@ -62,6 +62,10 @@ npx @kaandrick/nightshift
 That is the whole thing — it builds the window on first run, tells you whether it found a
 gateway, serves on **http://localhost:20200** and opens it. `Ctrl+C` closes the floor.
 
+> The npm name is scoped because the registry blocks the bare `nightshift` as too close to
+> an unrelated package called `night-shift`. `npm i nightshift` will simply find nothing —
+> the scope is the only published coordinate. The command it installs is still `nightshift`.
+
 Or from source, which is what you want if you intend to change anything:
 
 ```bash
