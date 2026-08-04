@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: types
+        run: npm run typecheck
+
+      - name: build the window
+        run: npm run build
+
+      # art.ts is DOM-free on purpose, so the sprites can be validated without a
+      # browser: wrong row length, unknown palette char, or an asset nothing draws.
+      - name: pixel art
+        run: npm run art
+
+      - name: the renderer still renders
+        run: npm run shots
