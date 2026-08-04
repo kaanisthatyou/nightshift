@@ -39,7 +39,8 @@
     "tools",
     "licenses",
     "nightshift-skill",
-    "keys.example.txt"
+    "keys.example.txt",
+    "NOTICE.md"
   ],
   "scripts": {
     "start": "node bin/nightshift.mjs",
