@@ -7,6 +7,7 @@
 ![the floor](docs/scene.png)
 
 [![ci](https://github.com/kaanisthatyou/nightshift/actions/workflows/ci.yml/badge.svg)](https://github.com/kaanisthatyou/nightshift/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@kaandrick/nightshift?color=ff5fa2&label=npm)](https://www.npmjs.com/package/@kaandrick/nightshift)
 [![license: MIT](https://img.shields.io/badge/license-MIT-ff5fa2)](LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A522.6-4fd1c5)](https://nodejs.org)
 
@@ -55,14 +56,22 @@ the small, boring, repetitive work gets pushed down to free models.
 ## Run it
 
 ```bash
+npx @kaandrick/nightshift
+```
+
+That is the whole thing — it builds the window on first run, tells you whether it found a
+gateway, serves on **http://localhost:20200** and opens it. `Ctrl+C` closes the floor.
+
+Or from source, which is what you want if you intend to change anything:
+
+```bash
 git clone https://github.com/kaanisthatyou/nightshift
 cd nightshift
 npm install
 npm start
 ```
 
-`npm start` builds the window on first run, tells you whether it found a gateway, serves
-everything on **http://localhost:20200** and opens it. `Ctrl+C` closes the floor.
+Either way the same flags apply:
 
 ```bash
 npm start -- --port 8080          # somewhere else

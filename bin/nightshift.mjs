@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // One command to open the floor, on any OS.
 //
-//   npx nightshift-office            build if needed, start, open the window
-//   npx nightshift-office --no-open  don't touch the browser
-//   npx nightshift-office --port 8080
+//   npx @kaandrick/nightshift            build if needed, start, open the window
+//   npx @kaandrick/nightshift --no-open  don't touch the browser
+//   npx @kaandrick/nightshift --port 8080
 //
 // It never installs OmniRoute for you and never pretends a gateway is up.
 import { spawn, spawnSync } from "node:child_process";

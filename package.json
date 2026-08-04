@@ -1,7 +1,10 @@
 {
-  "name": "nightshift",
+  "name": "@kaandrick/nightshift",
   "version": "0.1.0",
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "A pixel office where cheap models work the night shift and you are the boss — a visual floor for delegating small tasks to any model behind an OmniRoute gateway.",
   "keywords": [
     "llm",
