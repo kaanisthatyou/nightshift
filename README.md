@@ -242,7 +242,6 @@ depends on.
 
 MIT — see [LICENSE](LICENSE).
 
-The Silkscreen typeface is embedded as base64 so the floor works offline. It is copyright
-The Silkscreen Project Authors under the SIL Open Font License 1.1, reproduced in full at
-[`licenses/Silkscreen-OFL.txt`](licenses/Silkscreen-OFL.txt), and is not covered by the MIT
-license above.
+One exception: the Silkscreen typeface is embedded as base64 so the floor works offline. It
+is copyright The Silkscreen Project Authors under the SIL Open Font License 1.1 and is not
+covered by the MIT license — details in [NOTICE.md](NOTICE.md).

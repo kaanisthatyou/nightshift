@@ -19,11 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This project embeds the Silkscreen typeface (base64, in `web/src/fonts.css`) so
-the floor renders with the network unplugged. Silkscreen is copyright The
-Silkscreen Project Authors and is licensed under the SIL Open Font License 1.1,
-reproduced in full at `licenses/Silkscreen-OFL.txt`. It is not covered by the
-MIT license above.
