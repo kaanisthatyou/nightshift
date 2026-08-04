@@ -1,0 +1,25 @@
+# Provider API keys, one per line, for `npm run keys`.
+#
+# This file is only read by tools/import-keys.mjs, which pushes the keys into a
+# running OmniRoute. NIGHTSHIFT itself never stores a provider key — it only
+# talks to the gateway.
+#
+# Default location: ~/.omniroute/keys.txt
+# Or pass a path:   npm run keys -- ./my-keys.txt
+#
+# Never commit a real one. `keys.txt` and `*.keys.txt` are gitignored.
+#
+# Whatever separator you naturally type works: `=`, `:`, tab, or a single space.
+# `#` and `//` start a comment.
+
+openai = sk-proj-xxxxxxxxxxxxxxxxxxxxxxxx
+groq: gsk_xxxxxxxxxxxxxxxxxxxxxxxx
+mistral  xxxxxxxxxxxxxxxxxxxxxxxx
+
+# Optional extras after a `|`: a label, and a base URL to override the one
+# OmniRoute has on file for that provider.
+openrouter = sk-or-v1-xxxxxxxx | personal account
+some-selfhosted = key-xxxx | lab box | http://192.168.1.40:8000/v1
+
+# Dry run first if you want to check the parsing without sending anything:
+#   npm run keys -- --dry-run

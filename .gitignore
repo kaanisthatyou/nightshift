@@ -1,0 +1,11 @@
+node_modules/
+dist/
+data/floor.json
+server.log
+server.err
+.env
+.DS_Store
+keys.txt
+*.keys.txt
+tools/icons/*.tmp
+.art/

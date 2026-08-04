@@ -1,0 +1,79 @@
+{
+  "name": "nightshift",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A pixel office where cheap models work the night shift and you are the boss — a visual floor for delegating small tasks to any model behind an OmniRoute gateway.",
+  "keywords": [
+    "llm",
+    "agents",
+    "omniroute",
+    "openai-compatible",
+    "gateway",
+    "orchestration",
+    "claude-code",
+    "pixel-art",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "author": "Kaan (https://github.com/kaanisthatyou)",
+  "homepage": "https://github.com/kaanisthatyou/nightshift#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kaanisthatyou/nightshift.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kaanisthatyou/nightshift/issues"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "bin": {
+    "nightshift": "bin/nightshift.mjs"
+  },
+  "files": [
+    "bin",
+    "server",
+    "shared",
+    "web",
+    "dist",
+    "tools",
+    "licenses",
+    "nightshift-skill",
+    "keys.example.txt"
+  ],
+  "scripts": {
+    "start": "node bin/nightshift.mjs",
+    "serve": "cross-env NODE_ENV=production tsx server/index.ts",
+    "dev": "concurrently -k -n FLOOR,VIEW -c magenta,cyan \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "art": "tsx tools/pixel-preview.mts .art/",
+    "shots": "tsx tools/scene-shot.mts docs/",
+    "keys": "node tools/import-keys.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tsx": "^4.19.2",
+    "ws": "^8.18.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/ws": "^8.5.14",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11"
+  }
+}
