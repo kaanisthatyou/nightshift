@@ -50,11 +50,13 @@ const say = (s) => console.log(`  ${s}`);
 
 // ---- the window has to exist before we can serve it -------------------
 
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const run = (args, label) => {
-  const res = spawnSync(npm, args, { cwd: root, stdio: "inherit", shell: process.platform === "win32" });
+// npm is a .cmd on windows, which node will only spawn through a shell — and a
+// shell plus an args array is what DEP0190 warns about. One command string, no
+// args array, no warning, same behaviour everywhere.
+const npm = (cmd) => {
+  const res = spawnSync(`npm ${cmd}`, { cwd: root, stdio: "inherit", shell: true });
   if (res.status !== 0) {
-    console.error(`\n  ${label} failed. run \`npm ${args.join(" ")}\` in ${root} to see why.\n`);
+    console.error(`\n  \`npm ${cmd}\` failed. run it in ${root} to see why.\n`);
     process.exit(1);
   }
 };
@@ -62,10 +64,10 @@ const run = (args, label) => {
 if (!flag("--no-build") && !fs.existsSync(path.join(root, "dist", "index.html"))) {
   if (!fs.existsSync(path.join(root, "node_modules", "vite"))) {
     say("installing dependencies (first run only)...");
-    run(["install", "--no-audit", "--no-fund"], "install");
+    npm("install --no-audit --no-fund");
   }
   say("building the window (first run only)...");
-  run(["run", "build"], "build");
+  npm("run build");
 }
 
 // ---- gateway ----------------------------------------------------------

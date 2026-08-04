@@ -29,3 +29,16 @@ jobs:
 
       - name: the renderer still renders
         run: npm run shots
+
+      # the launcher is the documented way in, so it gets tested like one
+      - name: the floor comes up
+        run: |
+          node bin/nightshift.mjs --no-open --port 20255 &
+          floor=$!
+          for i in $(seq 1 40); do
+            sleep 1
+            curl -sf localhost:20255/api/health > /dev/null && break
+          done
+          curl -sf localhost:20255/api/health | tee /dev/stderr | grep -q '"ok":true'
+          curl -sf -o /dev/null localhost:20255/            # the built window is served
+          kill $floor
