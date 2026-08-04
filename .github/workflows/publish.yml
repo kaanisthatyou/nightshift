@@ -1,0 +1,34 @@
+name: publish
+
+# Publishing happens from CI, not from a laptop: npm verifies this workflow's
+# OIDC identity (trusted publishing), so there is no token to leak and no
+# one-time code to type. Cut a release on GitHub and it goes out.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for OIDC
+  contents: read
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # trusted publishing needs a recent npm; the one bundled with node 22 is older
+      - run: npm install -g npm@latest
+
+      - run: npm ci
+      - run: npm run typecheck
+
+      # prepublishOnly builds the window, which ships prebuilt so consumers
+      # never need vite
+      - run: npm publish
