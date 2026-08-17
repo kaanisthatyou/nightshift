@@ -328,6 +328,59 @@ function Wire() {
   );
 }
 
+/**
+ * The router. One combo is live at a time on the gateway, and every desk sitting
+ * on `auto` goes through it - which is how eight desks share one provider's
+ * per-minute quota instead of eight of them racing into the same ceiling.
+ */
+function ComboPanel() {
+  const state = useFloor((s) => s.state);
+  const [busy, setBusy] = useState<string | null>(null);
+  const combos = state?.gateway.combos ?? [];
+  const active = state?.gateway.activeCombo ?? null;
+
+  if (!state?.gateway.online || !combos.length) return null;
+
+  async function use(name: string) {
+    setBusy(name);
+    try {
+      await post("/combos/use", { name });
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="file">
+      <div className="form-title">
+        the router <span className="form-no">{active ? `live: ${active}` : "nothing live"}</span>
+      </div>
+      <div className="hint" style={{ marginBottom: 6 }}>
+        a combo spreads requests across a pool of models. desks on <kbd>auto</kbd> route through whichever is
+        live here - that is what keeps eight desks under one provider's per-minute limit.
+      </div>
+      {combos.map((c) => (
+        <div className={`combo-row ${c.active ? "on" : ""}`} key={c.id}>
+          <span className="ell grow" title={`${c.name} · ${c.strategy}`}>
+            {c.name}
+          </span>
+          <span className="combo-strat">{c.strategy}</span>
+          {c.targets != null && <span className="sub">{c.targets}</span>}
+          <button
+            className={`btn mini ${c.active ? "" : "primary"}`}
+            disabled={busy != null || c.active || !c.enabled}
+            onClick={() => void use(c.name)}
+          >
+            {c.active ? "live" : busy === c.name ? "..." : c.enabled ? "use" : "off"}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function GatewayPanel() {
   const state = useFloor((s) => s.state);
   const models = useFloor((s) => s.models);
@@ -383,6 +436,8 @@ function GatewayPanel() {
           </button>
         </div>
       </div>
+
+      <ComboPanel />
 
       <div className="file">
         <div className="form-title">house rules</div>

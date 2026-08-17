@@ -11,6 +11,21 @@ import type { ModelInfo } from "../../../shared/types.ts";
 const AUTO = "auto";
 type Tier = "all" | "free" | "unpriced" | "paid";
 
+/**
+ * OmniRoute's virtual combos. They are not models and never show up in the
+ * catalog, but a desk can sit on one and let the gateway spread its requests -
+ * `auto/offline` in particular picks whoever has the most rate-limit headroom
+ * left, which is what stops eight desks hammering one provider's quota.
+ */
+const ROUTERS: { id: string; blurb: string }[] = [
+  { id: "auto", blurb: "balanced · sticks to the last good provider" },
+  { id: "auto/offline", blurb: "most quota and rate-limit headroom first" },
+  { id: "auto/cheap", blurb: "cheapest per token first" },
+  { id: "auto/fast", blurb: "lowest latency first" },
+  { id: "auto/coding", blurb: "quality-first weights for code" },
+  { id: "auto/smart", blurb: "quality-first, explores for better ones" },
+];
+
 interface Group {
   key: string;
   models: ModelInfo[];
@@ -87,8 +102,20 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
   const [at, setAt] = useState({ left: 0, top: 0, fromBottom: 0, width: 0, up: false });
 
   const groups = useMemo(() => group(models, query, tier), [models, query, tier]);
+  // the routers are not in the catalog - they are the gateway's own combos, and
+  // they stay at the top whichever tier is being looked at
+  const routers = useMemo(() => {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const known = new Set(models.map((m) => m.id));
+    return ROUTERS.filter((r) => !known.has(r.id)).filter(
+      (r) => !terms.length || terms.every((t) => `${r.id} ${r.blurb}`.toLowerCase().includes(t)),
+    );
+  }, [models, query]);
   // one flat list behind the groups, so the arrow keys have somewhere to go
-  const flat = useMemo(() => [AUTO, ...groups.flatMap((g) => g.models.map((m) => m.id))], [groups]);
+  const flat = useMemo(
+    () => [...routers.map((r) => r.id), ...groups.flatMap((g) => g.models.map((m) => m.id))],
+    [routers, groups],
+  );
 
   useEffect(() => setCursor(0), [query, tier, open]);
 
@@ -208,15 +235,33 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
             ))}
           </div>
           <div className="ms-list" ref={listBox}>
-            <div
-              className={`ms-row ${cursor === 0 ? "on" : ""} ${value === AUTO ? "cur" : ""}`}
-              onMouseEnter={() => setCursor(0)}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => pick(AUTO)}
-            >
-              <span className="ell">auto (let omniroute pick)</span>
-              <span className="ms-tag auto">router</span>
-            </div>
+            {routers.length > 0 && (
+              <div>
+                <div className="ms-head">
+                  <span className="ell">routers</span>
+                  <span className="ms-count">the gateway picks</span>
+                </div>
+                {routers.map((r) => {
+                  const i = slot.get(r.id) ?? -1;
+                  return (
+                    <div
+                      key={r.id}
+                      className={`ms-row ${cursor === i ? "on" : ""} ${value === r.id ? "cur" : ""}`}
+                      onMouseEnter={() => setCursor(i)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => pick(r.id)}
+                      title={`${r.id} — ${r.blurb}`}
+                    >
+                      <span className="ms-name">
+                        {r.id}
+                        <span className="ms-blurb">{r.blurb}</span>
+                      </span>
+                      <span className="ms-tag auto">router</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             {groups.map((g) => (
               <div key={g.key}>
