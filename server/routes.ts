@@ -35,12 +35,14 @@ api.get("/models", async (req, res) => {
 export async function syncCombos(): Promise<void> {
   if (!store.state.gateway.online) return;
   try {
-    const { combos, active } = await gateway.combos();
-    store.state.gateway.combos = combos;
-    store.state.gateway.activeCombo = active;
+    await gateway.combos();
+    // read it back off the gateway rather than the return value: that is where
+    // "no combo endpoint at all" is kept as null instead of an empty list
+    store.state.gateway.combos = gateway.comboList;
+    store.state.gateway.activeCombo = gateway.activeCombo;
     store.touch();
   } catch {
-    store.state.gateway.combos = store.state.gateway.combos ?? null;
+    /* leave whatever was known before - a failed ask is not new information */
   }
 }
 

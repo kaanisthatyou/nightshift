@@ -218,21 +218,34 @@ export class Gateway {
    * simply has no such endpoint - that is not an error, just an empty toolbox.
    */
   async combos(): Promise<{ combos: ComboInfo[]; active: string | null }> {
-    const ask = async (path: string) => {
-      const res = await fetch(`${this.root()}${path}`, {
-        headers: this.headers(),
-        signal: AbortSignal.timeout(5000),
-      });
-      return res.ok ? await res.json().catch(() => null) : null;
+    const ask = async (path: string): Promise<{ ok: boolean; body: any }> => {
+      try {
+        const res = await fetch(`${this.root()}${path}`, {
+          headers: this.headers(),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok) return { ok: false, body: null };
+        return { ok: true, body: await res.json().catch(() => null) };
+      } catch {
+        return { ok: false, body: null };
+      }
     };
 
-    const [list, settings] = await Promise.all([
-      ask("/api/combos").catch(() => null),
-      ask("/api/settings").catch(() => null),
-    ]);
+    const [list, settings] = await Promise.all([ask("/api/combos"), ask("/api/settings")]);
 
-    const active: string | null = (settings as any)?.activeCombo ?? null;
-    const raw: any[] = Array.isArray(list) ? list : ((list as any)?.combos ?? []);
+    // a gateway that has no combo endpoint at all is not an omniroute, which is
+    // a different thing from an omniroute with no combo saved yet - and the
+    // window says something different for each, so the two must not collapse
+    if (!list.ok) {
+      this.comboList = null;
+      this.activeCombo = null;
+      this.status.combos = null;
+      this.status.activeCombo = null;
+      return { combos: [], active: null };
+    }
+
+    const active: string | null = (settings.body as any)?.activeCombo ?? null;
+    const raw: any[] = Array.isArray(list.body) ? list.body : (list.body?.combos ?? []);
     const combos = raw.map((c: any): ComboInfo => {
       const name = String(c?.name ?? c?.id ?? "?");
       const targets = c?.targets ?? c?.steps ?? c?.models;

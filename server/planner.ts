@@ -54,7 +54,10 @@ function draftPrompt(idea: string, presetId: string | null, count: number): stri
     `- ${count} steps. Fewer only if the idea genuinely does not need that many.`,
     "- Each step must be finishable by one model in one reply. No tools, no internet, no file access.",
     "- Each step's prompt must stand on its own: restate whatever context it needs, and say exactly what to output.",
-    "- Order them so that later steps can build on earlier ones. Write {{input}} where a step should receive the previous step's output.",
+    "- The desks work at the same time, so prefer steps that do not need each other. Split the idea by subject, " +
+      "not into a relay: cut it into parts that a different person could each take right now.",
+    "- Only where a step genuinely cannot start without the one before it, write {{input}} in its prompt to " +
+      "receive that output - and use it as rarely as the idea allows.",
     "- Assign each step a roleKey from the roster. Use the key exactly as written.",
     "- No step may be 'review the plan' or 'coordinate' - every step produces a real artefact.",
     "",
@@ -184,6 +187,10 @@ export async function draftPlan(opts: {
   const steps = coerceSteps(parsed, presetId);
   if (!steps.length) throw new Error("the planner came back with no usable steps");
 
+  // A plan whose steps do not feed each other has no reason to queue: the whole
+  // floor can take it at once. Only a real {{input}} makes it a chain.
+  const chained = steps.some((s) => s.prompt.includes("{{input}}") || s.prompt.includes("{{prev}}"));
+
   // planning is real spend - it belongs in the same ledger as everything else
   store.state.ledger.tokensIn += res.tokensIn;
   store.state.ledger.tokensOut += res.tokensOut;
@@ -195,7 +202,7 @@ export async function draftPlan(opts: {
     summary: String(parsed?.summary ?? "").slice(0, 300),
     presetId,
     steps,
-    mode: "chain",
+    mode: chained ? "chain" : "split",
     status: "draft",
     jobId: null,
     draftedBy: res.model,
@@ -243,8 +250,12 @@ export async function expandStep(plan: Plan, stepId: string, count = 3): Promise
   return fresh;
 }
 
-/** Which desk should take this step. roleKey first, then anyone free. */
-export function deskFor(step: PlanStep, taken: Set<string>): Worker | null {
+/**
+ * Which desk should take this step. A pin wins, then the role, then anyone.
+ * `spread` is for a split: waiting behind the one desk that holds a role would
+ * make a parallel plan run in single file, so an unclaimed desk beats a queue.
+ */
+export function deskFor(step: PlanStep, taken: Set<string>, spread = false): Worker | null {
   if (step.workerId) {
     const pinned = store.worker(step.workerId);
     if (pinned) return pinned;
@@ -252,6 +263,10 @@ export function deskFor(step: PlanStep, taken: Set<string>): Worker | null {
   const byRole = store.state.workers.filter((w) => step.roleKey && w.role === step.roleKey);
   const fresh = byRole.find((w) => !taken.has(w.id));
   if (fresh) return fresh;
+  if (spread) {
+    const free = store.state.workers.find((w) => !taken.has(w.id));
+    if (free) return free;
+  }
   if (byRole.length) return byRole[0]; // the specialist is worth a queue
   return null;
 }
@@ -271,7 +286,7 @@ export function runPlan(plan: Plan, mode?: Plan["mode"]) {
   const taken = new Set<string>();
 
   steps.forEach((step, i) => {
-    const desk = deskFor(step, taken);
+    const desk = deskFor(step, taken, plan.mode === "split");
     if (desk) taken.add(desk.id);
     const task = store.addTask({
       title: step.title,

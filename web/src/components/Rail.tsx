@@ -338,8 +338,13 @@ function ComboPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const combos = state?.gateway.combos ?? [];
   const active = state?.gateway.activeCombo ?? null;
+  // null means the gateway never answered /api/combos - i.e. it is not an
+  // omniroute. An empty array means it is, and you have not made one yet.
+  const unreadable = state?.gateway.combos == null;
 
-  if (!state?.gateway.online || !combos.length) return null;
+  // the panel stays on the wall even with nothing on it, or "where is the combo
+  // support" is a fair question with no answer on screen
+  if (!state?.gateway.online) return null;
 
   async function use(name: string) {
     setBusy(name);
@@ -355,12 +360,36 @@ function ComboPanel() {
   return (
     <div className="file">
       <div className="form-title">
-        the router <span className="form-no">{active ? `live: ${active}` : "nothing live"}</span>
+        the router{" "}
+        <span className="form-no">
+          {combos.length ? (active ? `live: ${active}` : "nothing live") : unreadable ? "no combo api" : "none yet"}
+        </span>
       </div>
       <div className="hint" style={{ marginBottom: 6 }}>
         a combo spreads requests across a pool of models. desks on <kbd>auto</kbd> route through whichever is
         live here - that is what keeps eight desks under one provider's per-minute limit.
       </div>
+
+      {!combos.length && (
+        <div className="hint" style={{ marginBottom: 6 }}>
+          {unreadable ? (
+            <>
+              this gateway does not answer <kbd>/api/combos</kbd>, so it is not an omniroute - or it wants the
+              api key you have not given it. the <b>routers</b> group in every model dropdown still works.
+            </>
+          ) : (
+            <>
+              omniroute has no combo saved yet. make one that spreads the floor across providers:
+              <br />
+              <kbd>omniroute combo create nim-spread --strategy round-robin</kbd>
+              <br />
+              then add targets in its dashboard. until then, put desks on <kbd>auto/offline</kbd> - it picks
+              whoever has the most rate-limit headroom left.
+            </>
+          )}
+        </div>
+      )}
+
       {combos.map((c) => (
         <div className={`combo-row ${c.active ? "on" : ""}`} key={c.id}>
           <span className="ell grow" title={`${c.name} · ${c.strategy}`}>

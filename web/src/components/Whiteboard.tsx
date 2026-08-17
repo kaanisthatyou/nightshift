@@ -386,8 +386,19 @@ function Board({ plan }: { plan: Plan }) {
             >
               + add another
             </button>
-            <button className="btn primary" disabled={!enabled || busy === "run"} onClick={() => void sendDown()}>
-              {busy === "run" ? "handing it out..." : `send ${enabled} down`}
+            <button
+              className="btn primary"
+              disabled={!enabled || busy === "run"}
+              title={
+                local.mode === "split"
+                  ? "every step goes out now, across every free desk"
+                  : "one step at a time, each feeding the next"
+              }
+              onClick={() => void sendDown()}
+            >
+              {busy === "run"
+                ? "handing it out..."
+                : `send ${enabled} down ${local.mode === "split" ? "at once" : "in order"}`}
             </button>
           </>
         )}
@@ -402,11 +413,15 @@ function Board({ plan }: { plan: Plan }) {
       )}
       {local.mode === "chain" && !live && (
         <div className="wb-note dim">
-          chain: each step waits for the one above it, and <kbd>{"{{input}}"}</kbd> receives its output. one failure stops the rest.
+          chain: one desk at a time. each step waits for the one above it and <kbd>{"{{input}}"}</kbd> receives its
+          output, so the floor runs at the speed of a single desk. one failure stops the rest.
         </div>
       )}
       {local.mode === "split" && !live && (
-        <div className="wb-note dim">split: every step goes out at once across free desks. nothing feeds anything.</div>
+        <div className="wb-note dim">
+          split: every step leaves at once and a different desk takes each one — the whole floor works in
+          parallel. nothing feeds anything, so each prompt has to carry its own context.
+        </div>
       )}
 
       <div className="wb-steps">
