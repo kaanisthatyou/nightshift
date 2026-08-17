@@ -1,6 +1,7 @@
 // The floor's memory. One JSON file, one event bus, no database ceremony.
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
@@ -10,7 +11,34 @@ import { buildPersona, roleSpec, TEMPERS } from "../shared/presets.ts";
 import { makeName, makeTitle } from "./flavor.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const DATA_DIR = path.resolve(__dirname, "..", "data");
+const INSTALL_DATA = path.resolve(__dirname, "..", "data");
+
+/**
+ * The floor's memory belongs to you, not to the copy of the program that wrote
+ * it. npx unpacks a new directory for every version, so a crew kept next to the
+ * code would be gone the moment you updated - you would hire the same eight
+ * desks again after every release. It lives in your home instead.
+ */
+function chooseDataDir(): string {
+  const chosen = process.env.NIGHTSHIFT_DATA
+    ? path.resolve(process.env.NIGHTSHIFT_DATA)
+    : path.join(os.homedir(), ".nightshift");
+  try {
+    fs.mkdirSync(chosen, { recursive: true });
+    // a floor written by an older version sat next to the code - bring it along,
+    // once, so nobody loses the crew they had on the release before this one
+    for (const file of ["floor.json", "mcp.json"]) {
+      const from = path.join(INSTALL_DATA, file);
+      const to = path.join(chosen, file);
+      if (fs.existsSync(from) && !fs.existsSync(to)) fs.copyFileSync(from, to);
+    }
+    return chosen;
+  } catch {
+    return INSTALL_DATA; // no home to write to: keep the old behaviour
+  }
+}
+
+export const DATA_DIR = chooseDataDir();
 const STATE_FILE = path.join(DATA_DIR, "floor.json");
 
 export const DESK_COUNT = 8;
@@ -107,17 +135,30 @@ class Store extends EventEmitter {
     for (let i = 0; i < 3; i++) this.hire({ model: this.state.settings.defaultModel });
   }
 
+  private writeNow() {
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(STATE_FILE, JSON.stringify(this.state, null, 2));
+    } catch (err) {
+      console.error("[floor] save failed:", err);
+    }
+  }
+
   save() {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
-      try {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-        fs.writeFileSync(STATE_FILE, JSON.stringify(this.state, null, 2));
-      } catch (err) {
-        console.error("[floor] save failed:", err);
-      }
+      this.writeNow();
     }, 400);
+  }
+
+  /** Write whatever is pending, right now. Ctrl+C must not cost you a hire. */
+  flush() {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.writeNow();
   }
 
   /** Broadcast a moment. The window turns these into animation. */

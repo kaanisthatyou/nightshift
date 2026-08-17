@@ -105,6 +105,16 @@ From a clone it is `git pull && npm install && npm run build`. The check is a si
 request to the npm registry with a 2.5s leash — silence it with `--no-update-check` or
 `NIGHTSHIFT_NO_UPDATE_CHECK=1`, and it stays quiet on its own when you are offline.
 
+Your floor survives the update. The crew you hired, their heads, the models on their desks,
+the settings and the toolbox live in **`~/.nightshift/`**, not next to the code — npx unpacks
+a fresh directory for every version, and a crew kept there would be gone the moment you
+updated. Point `NIGHTSHIFT_DATA` somewhere else to keep separate floors:
+
+```bash
+NIGHTSHIFT_DATA=~/work/floor-a nightshift --port 20200
+NIGHTSHIFT_DATA=~/work/floor-b nightshift --port 20201    # a second office, same machine
+```
+
 ### Plug in a gateway
 
 ```bash
@@ -352,7 +362,7 @@ bin/nightshift.mjs  the one command: build check, gateway probe, serve, open
 server/             floor server: gateway client, scheduler, REST, websocket
   omniroute.ts        streaming OpenAI-compatible client + model/pricing normalising
   engine.ts           who works on what, retries, pipelines, the theatre timing
-  store.ts            state + json persistence (data/floor.json)
+  store.ts            state + json persistence (~/.nightshift/floor.json)
   routes.ts           the API above
   planner.ts          the whiteboard: idea -> steps -> one job
   mcp.ts              the toolbox: mcp servers over stdio/http/sse, and the tool loop
