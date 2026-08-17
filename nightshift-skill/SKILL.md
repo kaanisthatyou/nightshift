@@ -186,6 +186,25 @@ model than the desks, since everything downstream inherits its judgement.
 
 Poll `GET /api/plans/<planId>` for the plan plus its tasks.
 
+## Volume without tripping a rate limit
+
+The floor runs all eight desks at once (`settings.maxParallel`, 8 by default). On a free tier
+that is eight requests a minute into one provider, so before a big batch:
+
+```bash
+curl -s localhost:20200/api/combos                      # the gateway's pools, and which is live
+curl -s localhost:20200/api/combos/use -H 'content-type: application/json' \
+  -d '{"name":"<a round-robin or headroom combo>"}'     # spread the desks across providers
+```
+
+Desks sitting on `auto` follow the live combo; `auto/offline` picks whoever has the most
+rate-limit headroom left. Both beat pinning eight desks to one model id.
+
+You do not have to handle 429 yourself. A rate-limited task waits exactly as long as the
+provider asked, keeps its retry budget, and moves to the router if it is told to wait twice —
+`GET /api/tasks/<id>` reports it as `waits`, with `fallbackFrom` set if it was rerouted. A task
+still sitting at `queued` with `waits > 0` is waiting out a window, not stuck.
+
 ## The toolbox — when a desk needs more than words
 
 Desks can call MCP tools. `GET /api/mcp` lists the servers the floor has open and every

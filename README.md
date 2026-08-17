@@ -212,6 +212,32 @@ Planning runs on its own model (**mains ▸ planner**) — worth a smarter one t
 since every step inherits its judgement. That call lands on the same payroll as everything
 else; nothing is spent quietly.
 
+## The router — eight desks under one rate limit
+
+Eight desks working at once is eight requests a minute into the same provider, and a free
+tier like NVIDIA NIM's 40 RPM notices. Two things keep the floor under it.
+
+**A combo does the spreading.** OmniRoute's combos are pools of models it routes across by a
+strategy — `round-robin`, `least-used`, `headroom`, and sixteen others. The **mains ▸ the
+router** panel lists the combos your gateway has, says which one is live, and switches it in
+one click; every desk sitting on `auto` follows it. The picker also offers the virtual ones
+straight up, under **routers**:
+
+| | |
+|---|---|
+| `auto` | balanced — sticks to the last good provider |
+| `auto/offline` | **most quota and rate-limit headroom first** — the one for a busy floor |
+| `auto/cheap` · `auto/fast` · `auto/coding` · `auto/smart` | cheapest, lowest latency, code weights, quality + exploration |
+
+**A rate limit is a clock, not a failure.** When a provider answers `429`, the desk does not
+fail: it takes a coffee for exactly as long as `Retry-After` said, the task waits with it, and
+nothing is marked failed, no retry is spent and no morale is lost. If the same task is told to
+wait twice, it moves to the router — stamped `fell back from <model>`, like every other
+reroute. Four waits in a row is a wall, not a busy minute, and it is reported as a failure.
+
+So the honest way to run a free NIM tier flat out is: desks on `auto` (or `auto/offline`), a
+`round-robin` or `headroom` combo live, and **at once** on 8.
+
 ## The toolbox — MCP servers on a desk
 
 A desk can be given real tools. Point NIGHTSHIFT at an MCP server and its tools become
@@ -285,6 +311,8 @@ Then just say *"nightshift these"* and hand over a batch.
 | GET | `/api/models?refresh=1` | model board with free/price flags |
 | POST | `/api/gateway` | `{baseUrl, apiKey}` — reconnect |
 | POST | `/api/settings` | `{autoAssign?, ghostMode?, maxParallel?, defaultModel?, plannerModel?, mcpEnabled?, mcpMaxRounds?}` |
+| GET | `/api/combos` | the gateway's routing combos and which one is live |
+| POST | `/api/combos/use` | `{name}` — switch the live combo |
 | GET | `/api/presets` | the loadout catalog: crews, roles, tempers |
 | POST | `/api/presets/:id/hire` | `{replace?, roleKeys?, model?, temper?}` — bring a crew in |
 | POST | `/api/workers` | `{model?, presetId?, roleKey?, temper?, name?, persona?}` — hire one |
