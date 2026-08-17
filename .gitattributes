@@ -3,3 +3,6 @@
 
 *.png binary
 *.ico binary
+
+# except cmd, which is the one reader that can trip over a bare LF
+*.bat text eol=crlf
