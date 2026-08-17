@@ -22,6 +22,23 @@ mcp.load();
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
+
+/**
+ * A body that is not JSON is almost always a shell eating the quotes: powershell
+ * strips the inner ones out of `curl -d '{"a":1}'` and sends `{a:1}`. The parser
+ * error alone ("Expected property name...") does not tell you that, so this does.
+ */
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err?.type !== "entity.parse.failed") return next(err);
+  res.status(400).json({
+    error: "that body is not valid JSON",
+    hint:
+      "on powershell the inner quotes get stripped from -d '{\"a\":1}'. use curl.exe with --% " +
+      "(curl.exe --% -d {\"a\":1} ...), or Invoke-RestMethod -Body '{\"a\":1}' -ContentType application/json.",
+    received: typeof err?.body === "string" ? err.body.slice(0, 120) : undefined,
+  });
+});
+
 app.use("/api", api);
 
 const dist = path.resolve(__dirname, "..", "dist");
@@ -95,7 +112,8 @@ server.listen(PORT, async () => {
   }
 });
 
-// stdio servers are our children - do not leave them running
-const shutdown = () => { mcp.closeAll(); process.exit(0); };
+// stdio servers are our children - do not leave them running, and the floor
+// gets written on the way out so a ctrl+c never costs you the crew you hired
+const shutdown = () => { store.flush(); mcp.closeAll(); process.exit(0); };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
