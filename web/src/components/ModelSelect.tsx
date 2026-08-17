@@ -1,20 +1,24 @@
 // The model picker. A native select could not do the two things this needs -
 // search across 500 model ids, and never open a white browser popup over a 3am
-// office - so the list is ours. Grouped so that free, unpriced and paid are
-// never mistaken for each other.
+// office - so the list is ours. One provider is one heading, so you read
+// "nvidia" once instead of on every row, and the row keeps the part that
+// actually differs.
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useFloor } from "../store.ts";
 import type { ModelInfo } from "../../../shared/types.ts";
 
 const AUTO = "auto";
+type Tier = "all" | "free" | "unpriced" | "paid";
 
-/** free -> no price -> paid, and inside a tier the provider prefix keeps its own. */
 interface Group {
   key: string;
-  label: string;
-  tone: "free" | "unpriced" | "paid";
   models: ModelInfo[];
+  free: number;
+}
+
+function tierOf(m: ModelInfo) {
+  return m.free ? "free" : m.unpriced ? "unpriced" : "paid";
 }
 
 function priceOf(m: ModelInfo) {
@@ -23,28 +27,56 @@ function priceOf(m: ModelInfo) {
   return `$${m.promptCost.toFixed(2)}/M`;
 }
 
-/** Match on the whole id, and on the last segment, so "gpt-oss" finds it too. */
+const WHY_UNPRICED =
+  "the gateway reported no price for this model. unknown is not the same as free - " +
+  "add credentials for that provider in omniroute and the price shows up.";
+
+/** `nvidia/openai/gpt-oss-120b` is nvidia's, and the row only has to say the rest. */
+function providerOf(m: ModelInfo) {
+  const cut = m.id.indexOf("/");
+  return cut > 0 ? m.id.slice(0, cut) : m.owned_by || "other";
+}
+function restOf(m: ModelInfo) {
+  const cut = m.id.indexOf("/");
+  return cut > 0 ? m.id.slice(cut + 1) : m.id;
+}
+
 function matches(m: ModelInfo, terms: string[]) {
   const hay = `${m.id} ${m.label ?? ""} ${m.owned_by ?? ""}`.toLowerCase();
   return terms.every((t) => hay.includes(t));
 }
 
-function group(models: ModelInfo[], query: string): Group[] {
+/** One group per provider, free models first inside it, cheapest before dearest. */
+function group(models: ModelInfo[], query: string, tier: Tier): Group[] {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const hits = terms.length ? models.filter((m) => matches(m, terms)) : models;
+  const hits = models
+    .filter((m) => tier === "all" || tierOf(m) === tier)
+    .filter((m) => !terms.length || matches(m, terms));
 
-  const tiers: Group[] = [
-    { key: "free", label: "free", tone: "free", models: hits.filter((m) => m.free) },
-    { key: "unpriced", label: "no price reported", tone: "unpriced", models: hits.filter((m) => m.unpriced) },
-    { key: "paid", label: "paid", tone: "paid", models: hits.filter((m) => !m.free && !m.unpriced) },
-  ];
-  return tiers.filter((t) => t.models.length);
+  const by = new Map<string, ModelInfo[]>();
+  for (const m of hits) {
+    const p = providerOf(m);
+    const list = by.get(p);
+    if (list) list.push(m);
+    else by.set(p, [m]);
+  }
+
+  const rank = (m: ModelInfo) => (m.free ? 0 : m.unpriced ? 1 : 2);
+  return [...by.entries()]
+    .map(([key, list]) => ({
+      key,
+      free: list.filter((m) => m.free).length,
+      models: list.sort((a, b) => rank(a) - rank(b) || a.promptCost - b.promptCost || a.id.localeCompare(b.id)),
+    }))
+    // whoever gives you the most free desks is worth reading first
+    .sort((a, b) => b.free - a.free || b.models.length - a.models.length || a.key.localeCompare(b.key));
 }
 
 export default function ModelSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const models = useFloor((s) => s.models);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [tier, setTier] = useState<Tier>("all");
   const [cursor, setCursor] = useState(0);
   const box = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLInputElement>(null);
@@ -54,11 +86,11 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
   // would be cut off at the panel edge. it goes to the body and is placed by hand.
   const [at, setAt] = useState({ left: 0, top: 0, fromBottom: 0, width: 0, up: false });
 
-  const groups = useMemo(() => group(models, query), [models, query]);
+  const groups = useMemo(() => group(models, query, tier), [models, query, tier]);
   // one flat list behind the groups, so the arrow keys have somewhere to go
   const flat = useMemo(() => [AUTO, ...groups.flatMap((g) => g.models.map((m) => m.id))], [groups]);
 
-  useEffect(() => setCursor(0), [query, open]);
+  useEffect(() => setCursor(0), [query, tier, open]);
 
   // measure before paint, then keep up with whatever scrolls underneath it
   useLayoutEffect(() => {
@@ -72,7 +104,8 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
         setOpen(false);
         return;
       }
-      const width = Math.max(r.width, 260);
+      // wide enough that a real model id is not cut in half
+      const width = Math.min(Math.max(r.width, 340), window.innerWidth - 16);
       setAt({
         left: Math.min(r.left, window.innerWidth - width - 8),
         top: r.bottom + 2,
@@ -159,6 +192,21 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
             onKeyDown={onKey}
             placeholder={models.length ? `search ${models.length} models...` : "no gateway - nothing to search"}
           />
+
+          <div className="ms-chips">
+            {(["all", "free", "unpriced", "paid"] as Tier[]).map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={`ms-chip ${t} ${tier === t ? "on" : ""}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setTier(t)}
+                title={t === "unpriced" ? WHY_UNPRICED : undefined}
+              >
+                {t === "unpriced" ? "no price" : t}
+              </button>
+            ))}
+          </div>
           <div className="ms-list" ref={listBox}>
             <div
               className={`ms-row ${cursor === 0 ? "on" : ""} ${value === AUTO ? "cur" : ""}`}
@@ -172,11 +220,16 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
 
             {groups.map((g) => (
               <div key={g.key}>
-                <div className={`ms-head ${g.tone}`}>
-                  {g.label} <b>{g.models.length}</b>
+                <div className="ms-head">
+                  <span className="ell">{g.key}</span>
+                  <span className="ms-count">
+                    {g.models.length}
+                    {g.free > 0 && <b> · {g.free} free</b>}
+                  </span>
                 </div>
                 {g.models.map((m) => {
                   const i = slot.get(m.id) ?? -1;
+                  const tone = tierOf(m);
                   return (
                     <div
                       key={m.id}
@@ -184,10 +237,14 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
                       onMouseEnter={() => setCursor(i)}
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => pick(m.id)}
-                      title={m.context ? `${m.id} · ${Math.round(m.context / 1000)}k context` : m.id}
+                      title={`${m.id}${m.context ? ` · ${Math.round(m.context / 1000)}k context` : ""}${
+                        m.unpriced ? `\n${WHY_UNPRICED}` : ""
+                      }`}
                     >
-                      <span className="ell">{m.id}</span>
-                      <span className={`ms-tag ${g.tone}`}>{priceOf(m)}</span>
+                      <span className="ms-name">{restOf(m)}</span>
+                      <span className={`ms-tag ${tone}`} title={m.unpriced ? WHY_UNPRICED : undefined}>
+                        {priceOf(m)}
+                      </span>
                     </div>
                   );
                 })}
@@ -196,7 +253,11 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
 
             {!groups.length && (
               <div className="ms-empty">
-                {models.length ? `nothing matches "${query}"` : "connect a gateway and the board fills up"}
+                {!models.length
+                  ? "connect a gateway and the board fills up"
+                  : query
+                    ? `nothing matches "${query}"`
+                    : `no ${tier === "unpriced" ? "unpriced" : tier} models on the board`}
               </div>
             )}
           </div>

@@ -427,30 +427,59 @@ canvas.floor {
 .ms-search::placeholder { color: var(--dim); }
 .ms-list { max-height: 264px; overflow-y: auto; }
 
+/* one line per provider, so "nvidia" is read once and not on every row */
 .ms-head {
   position: sticky;
   top: 0;
-  padding: 3px 7px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
   background: #0b0e16;
+  border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line-soft);
-  color: var(--dim);
-  font-size: 8px;
+  color: var(--cyan);
+  font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.ms-head.free { color: var(--green); }
-.ms-head.unpriced { color: var(--amber); }
-.ms-head.paid { color: var(--cyan); }
-.ms-head b { color: var(--text); font-weight: normal; }
+.ms-head .ell { flex: 1; min-width: 0; }
+.ms-count { flex: none; color: var(--dim); font-size: 8px; }
+.ms-count b { color: var(--green); font-weight: normal; }
+
+.ms-chips {
+  display: flex;
+  gap: 3px;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line-soft);
+  background: #080b12;
+}
+.ms-chip {
+  flex: 1;
+  padding: 2px 3px;
+  background: #0b0e16;
+  border: 1px solid var(--line-soft);
+  color: var(--dim);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ms-chip:hover { border-color: var(--mag); }
+.ms-chip.on { color: var(--text); border-color: var(--mag); background: #1a1120; }
+.ms-chip.free.on { color: var(--green); border-color: #2e7a45; background: #0c1a12; }
+.ms-chip.unpriced.on { color: var(--amber); border-color: #7a5a20; background: #1a1509; }
+.ms-chip.paid.on { color: var(--cyan); border-color: #1d5e75; background: #08161c; }
 
 .ms-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 7px;
+  padding: 4px 7px 4px 10px;
   color: var(--text);
   font-size: 10px;
 }
+/* a long id wraps rather than losing its tail to an ellipsis */
+.ms-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .ms-row.on { background: #141a2a; }
 .ms-row.cur { box-shadow: inset 3px 0 0 var(--mag); }
 .ms-empty { padding: 9px 7px; color: var(--dim); font-size: 10px; }
