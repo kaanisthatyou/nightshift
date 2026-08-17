@@ -16,6 +16,10 @@
   --red: #ff5c5c;
   --rust: #d97757;
   --px: 2px;
+
+  /* native widgets - the select popup, the caret, autofill - are drawn by the
+     browser, and on windows they come up white unless the page says otherwise */
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -38,6 +42,21 @@ button, input, select, textarea {
   color: inherit;
   cursor: inherit;
 }
+
+/* the floor is never light: any field that misses its own rule still lands dark */
+input, select, textarea {
+  background-color: #080a10;
+  color: var(--text);
+}
+
+/* the list a select drops down is the browser's own window: it takes the
+   control's background-color, never its background-image, so a gradient alone
+   leaves it transparent and the model names end up dark-on-white */
+option, optgroup {
+  background-color: #0b0e16;
+  color: var(--text);
+}
+optgroup { color: var(--dim); font-style: normal; }
 
 ::selection { background: var(--mag); color: #0a0c13; }
 
@@ -334,7 +353,8 @@ canvas.floor {
   width: 100%;
   appearance: none;
   -webkit-appearance: none;
-  background: linear-gradient(90deg, var(--cyan) 0 3px, #0b0e16 3px);
+  background-color: #0b0e16;
+  background-image: linear-gradient(90deg, var(--cyan) 0 3px, transparent 3px);
   border: 1px solid var(--line);
   color: var(--text);
   font-size: 10px;
@@ -350,6 +370,90 @@ canvas.floor {
   font-size: 9px;
 }
 .strip select:hover { border-color: var(--mag); }
+
+/* ---- the model picker: search over 500 ids, and a list we draw ourselves ---- */
+.ms { position: relative; display: block; width: 100%; min-width: 0; }
+.strip:has(.ms)::after { content: none; } /* it carries its own caret */
+
+.ms-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background-color: #0b0e16;
+  background-image: linear-gradient(90deg, var(--cyan) 0 3px, transparent 3px);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 10px;
+  text-align: left;
+  padding: 3px 6px 3px 8px;
+}
+.ms-field:hover, .ms.open .ms-field { border-color: var(--mag); }
+.ms-val { flex: 1; min-width: 0; }
+.ms-caret { flex: none; color: var(--dim); font-size: 9px; }
+
+.ms-tag {
+  flex: none;
+  padding: 1px 3px;
+  border: 1px solid var(--line-soft);
+  color: var(--dim);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.ms-tag.free { color: var(--green); border-color: #2e7a45; }
+.ms-tag.unpriced { color: var(--amber); border-color: #7a5a20; }
+.ms-tag.paid { color: var(--cyan); border-color: #1d5e75; }
+.ms-tag.auto { color: var(--mag); border-color: #7a2447; }
+
+/* it lives on the body, not in the rail, so the panel edge cannot clip it */
+.ms-pop {
+  position: fixed;
+  z-index: 60;
+  background: #05070c;
+  border: var(--px) solid var(--mag);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+}
+.ms-search {
+  width: 100%;
+  background: #0b0e16;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-size: 10px;
+  padding: 6px 7px;
+  outline: none;
+}
+.ms-search::placeholder { color: var(--dim); }
+.ms-list { max-height: 264px; overflow-y: auto; }
+
+.ms-head {
+  position: sticky;
+  top: 0;
+  padding: 3px 7px;
+  background: #0b0e16;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--dim);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.ms-head.free { color: var(--green); }
+.ms-head.unpriced { color: var(--amber); }
+.ms-head.paid { color: var(--cyan); }
+.ms-head b { color: var(--text); font-weight: normal; }
+
+.ms-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  color: var(--text);
+  font-size: 10px;
+}
+.ms-row.on { background: #141a2a; }
+.ms-row.cur { box-shadow: inset 3px 0 0 var(--mag); }
+.ms-empty { padding: 9px 7px; color: var(--dim); font-size: 10px; }
 
 .pips { display: flex; gap: 2px; flex: 1; }
 .pips i { flex: 1; height: 9px; background: #0b0e16; border: 1px solid var(--line-soft); }
