@@ -21,8 +21,9 @@ watching is the actual response coming in. Finished work flies into the IN tray 
 for you to approve it or throw it back.
 
 It is a real tool wearing a costume: a local model gateway, a job queue, batching,
-pipelines, and an A/B arena — with a window you can leave open on a second monitor and
-actually enjoy looking at.
+pipelines, an A/B arena, crew loadouts with real personas, and a whiteboard that cuts an
+idea into work — with a window you can leave open on a second monitor and actually enjoy
+looking at.
 
 Claude Code drives the same floor over HTTP, so the heavy thinking happens in Claude while
 the small, boring, repetitive work gets pushed down to free models.
@@ -89,6 +90,21 @@ Working on it instead of using it:
 npm run dev          # floor :20200 + vite :5180 with HMR, open http://localhost:5180
 ```
 
+### Keep it current
+
+The floor asks npm on boot whether something newer exists and prints one line if so.
+Nothing installs itself behind your back — updating is a command you type:
+
+```bash
+npx @kaandrick/nightshift@latest   # npx caches by name, @latest is how you get past it
+nightshift --update                # installed it globally? this replaces it
+nightshift --version               # what you are actually running
+```
+
+From a clone it is `git pull && npm install && npm run build`. The check is a single
+request to the npm registry with a 2.5s leash — silence it with `--no-update-check` or
+`NIGHTSHIFT_NO_UPDATE_CHECK=1`, and it stays quiet on its own when you are offline.
+
 ### Plug in a gateway
 
 ```bash
@@ -128,8 +144,8 @@ talks to the gateway.
 | payroll | real cost, computed from the gateway's pricing |
 | neon sign | pink = gateway up, red flicker = gateway down |
 
-Click a desk to select it, `/` focuses the order bar, `Esc` closes a task. Three desks are
-already staffed on first boot so there is something to give an order to.
+Click a desk to select it, `/` focuses the order bar, `Esc` closes a task or the whiteboard.
+Three desks are already staffed on first boot so there is something to give an order to.
 
 ### Two rules the product will not break
 
@@ -147,6 +163,80 @@ who actually did the work.
 And with no gateway reachable at all, the floor still runs — but every output is marked
 `GHOST OUTPUT` and tagged `ghost` in the API. Nothing is sent anywhere and nothing is made
 up. Turn it off in gateway → house rules.
+
+## Loadouts — a crew, not eight copies of one model
+
+A desk is not just a model with a name on it. Under **crew** you pick a **loadout** and the
+crew walks in together: pick *Roblox Studio* and you get a game designer, a Luau systems
+engineer, a set builder and a UI designer, each with a system prompt written for that job.
+Behind them is a **bench** — `+ add another` gives you the asset & tool scout, the economy
+balancer, the playtester, the live-ops desk. Hire, fire, hire someone else.
+
+| loadout | who walks in |
+|---|---|
+| `roblox` | designer · luau · builder · ui — bench: tool scout, economy, vfx, playtester, live ops |
+| `webapp` | product · frontend · backend · design — bench: copy, security, deploy, tests |
+| `content` | research · script · titles · editor — bench: thumbnails, distribution |
+| `research` | scout · summariser · skeptic · synthesist — bench: sourcing |
+| `data` | extractor · classifier · cleaner — bench: schema, analyst |
+| `localize` | translator · tone editor · glossary — bench: cultural adapter |
+| `venture` | market · strategy · naming · pitch — bench: devil's advocate |
+| `general` | generalist · writer · editor — bench: code hand, list machine |
+
+Every desk also gets a **temper** — `perfectionist`, `speedrunner`, `contrarian`, `pedant`,
+`showman`, `minimalist`, `paranoid`, `steady` — which is welded onto the role to make that
+desk's actual system prompt. Two desks on the same role with different heads give you two
+genuinely different answers, which is the point. Open **head** on any file card to read the
+prompt, swap the temper, or write your own.
+
+## The whiteboard — plan it before you work it
+
+![the whiteboard](docs/whiteboard.png)
+
+Some asks are bigger than one desk. Type the whole messy idea into the whiteboard, hit
+**span it out**, and it comes back as steps: each with a title, a self-contained prompt, and
+a role against it. Then the part that matters — you edit it. Rewrite a prompt, reorder,
+untick what you do not want, pin a step to a specific desk, or **split this one** to break a
+step into three. Nothing has run and nothing has cost anything yet.
+
+When it looks right, **send it down** as one job:
+
+- **chain** — each step waits for the one above it and `{{input}}` receives its output.
+- **split** — every step goes out at once across free desks.
+
+The plan then shows up in the **plan** tab with live progress while the floor works, so you
+can watch it land desk by desk. `plan it` next to the order bar carries whatever you already
+typed straight onto the board.
+
+Planning runs on its own model (**mains ▸ planner**) — worth a smarter one than the desks,
+since every step inherits its judgement. That call lands on the same payroll as everything
+else; nothing is spent quietly.
+
+## The toolbox — MCP servers on a desk
+
+A desk can be given real tools. Point NIGHTSHIFT at an MCP server and its tools become
+callable by whichever desks you hand them to: the model asks for a tool, the floor runs it,
+the result goes back into the same conversation, and it repeats until the desk answers in
+words or burns `mcpMaxRounds` (6 by default). Every call is recorded on the task — server,
+tool, arguments, result, milliseconds — so you can see what a desk actually touched.
+
+There is no panel for it yet; it lives on the API and in `data/mcp.json`:
+
+```bash
+# stdio, http and sse all work — or paste a whole mcpServers block from another client
+curl -s localhost:20200/api/mcp -H 'content-type: application/json' \
+  -d '{"name":"fs","transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}'
+
+curl -s localhost:20200/api/mcp                       # who is up, and their tool lists
+curl -s -X PATCH localhost:20200/api/workers/<id> -H 'content-type: application/json' \
+  -d '{"mcpIds":["<serverId>"]}'                      # hand that server to one desk
+```
+
+Two things worth knowing. A desk only sees servers you gave it — nobody gets the whole
+toolbox by default, because twenty-six schemas in front of a cheap model is how you get the
+wrong tool called. And a stdio server is a child process of the floor: it starts when the
+floor does and dies with it. Turn the whole thing off with `POST /api/settings
+{"mcpEnabled":false}`.
 
 ## Batches, pipelines, arena
 
@@ -194,8 +284,11 @@ Then just say *"nightshift these"* and hand over a batch.
 | GET | `/api/state` | full snapshot: workers, tasks, jobs, ledger, gateway |
 | GET | `/api/models?refresh=1` | model board with free/price flags |
 | POST | `/api/gateway` | `{baseUrl, apiKey}` — reconnect |
-| POST | `/api/workers` | `{model, name?, title?}` — hire |
-| PATCH | `/api/workers/:id` | `{model?, name?, state?}` — reassign a desk |
+| POST | `/api/settings` | `{autoAssign?, ghostMode?, maxParallel?, defaultModel?, plannerModel?, mcpEnabled?, mcpMaxRounds?}` |
+| GET | `/api/presets` | the loadout catalog: crews, roles, tempers |
+| POST | `/api/presets/:id/hire` | `{replace?, roleKeys?, model?, temper?}` — bring a crew in |
+| POST | `/api/workers` | `{model?, presetId?, roleKey?, temper?, name?, persona?}` — hire one |
+| PATCH | `/api/workers/:id` | `{model?, roleKey?, temper?, persona?, name?, state?, mcpIds?, mcpTools?}` — change the desk, the head, or its tools |
 | DELETE | `/api/workers/:id` | fire |
 | POST | `/api/orders` | `{text, workerId?, model?, wait?, waitMs?}` — the boss walks over |
 | POST | `/api/tasks` | same but without the theatre defaults |
@@ -203,6 +296,17 @@ Then just say *"nightshift these"* and hand over a batch.
 | POST | `/api/tasks/:id/approve` | morale up, task closed |
 | POST | `/api/tasks/:id/reject` | `{note}` — sends it back with your note attached |
 | POST | `/api/tasks/:id/retry` | run it again |
+| POST | `/api/plans` | `{idea, presetId?, stepCount?}` — span an idea out (or pass `steps` to write it yourself) |
+| GET | `/api/plans/:id` | the plan and the tasks it was cut into |
+| PATCH | `/api/plans/:id` | `{title?, mode?, steps?}` — edit the board |
+| POST | `/api/plans/:id/expand` | `{stepId, count?}` — split one step into several |
+| POST | `/api/plans/:id/run` | `{mode}` — `chain` or `split`, onto the floor |
+| GET | `/api/mcp` | the toolbox: every server, its state and its tools |
+| POST | `/api/mcp` | one server, or a whole `mcpServers` block pasted from another client |
+| PATCH | `/api/mcp/:id` | `{enabled?, allow?, ...}` — edit and reconnect |
+| DELETE | `/api/mcp/:id` | drop it, and take it off every desk |
+| POST | `/api/mcp/:id/reconnect` | re-open and re-list its tools |
+| POST | `/api/mcp/:id/call` | `{tool, args}` — call one yourself, to check it works |
 | POST | `/api/jobs` | `{title, steps:[{title, prompt}]}` — pipeline |
 | POST | `/api/batch` | `{title, template, items[], retries}` — one list split across desks |
 | POST | `/api/arena` | `{text, workerIds?}` — same prompt to several desks |
@@ -222,13 +326,16 @@ server/             floor server: gateway client, scheduler, REST, websocket
   engine.ts           who works on what, retries, pipelines, the theatre timing
   store.ts            state + json persistence (data/floor.json)
   routes.ts           the API above
+  planner.ts          the whiteboard: idea -> steps -> one job
+  mcp.ts              the toolbox: mcp servers over stdio/http/sse, and the tool loop
 web/src/            the window
   pixel/art.ts        every object on the floor as a char grid, DOM-free on purpose
   pixel/sprites.ts    bakes art.ts to canvases, plus the people
   pixel/scene.ts      the 360x240 renderer: rain, lighting, walking, bubbles
-  components/         roster, board, wire, gateway panels
+  components/         crew, plan, board, wire, mains panels + the whiteboard
 tools/              art review and key import
 shared/             types both sides agree on
+  presets.ts          the crew loadouts, roles and tempers
 ```
 
 ## Drawing the pixel art
