@@ -37,7 +37,8 @@ function blankState(): FloorState {
     settings: {
       autoAssign: true,
       ghostMode: true,
-      maxParallel: 4,
+      // the whole floor at once: eight desks, eight jobs in flight
+      maxParallel: DESK_COUNT,
       defaultModel: "auto",
       plannerModel: "auto",
       mcpEnabled: true,
@@ -78,6 +79,10 @@ class Store extends EventEmitter {
           if (t.stage === "running") { t.stage = "queued"; t.workerId = t.workerId ?? null; }
           if (!Array.isArray(t.toolCalls)) t.toolCalls = [];
         }
+        // floors written before the rate-limit handling was in place were held at
+        // four in flight because a burst was expensive to recover from. It is not
+        // any more, so a floor still sitting on that old ceiling is opened up.
+        if (raw?.settings?.maxParallel === 4) this.state.settings.maxParallel = DESK_COUNT;
         // a shift that ended hours ago is over - the clock starts at 22:00 again
         if (Date.now() - this.state.ledger.shiftStartedAt > 6 * 60 * 60 * 1000) {
           this.state.ledger.shiftStartedAt = Date.now();
@@ -249,6 +254,7 @@ class Store extends EventEmitter {
       costUsd: 0,
       latencyMs: 0,
       attempts: 0,
+      waits: 0,
       decision: null,
       ghost: false,
       reviewNote: null,

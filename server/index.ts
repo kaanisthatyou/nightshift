@@ -6,7 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
-import { api } from "./routes.ts";
+import { api, syncCombos } from "./routes.ts";
 import { store } from "./store.ts";
 import { gateway, startEngine } from "./engine.ts";
 import { mcp } from "./mcp.ts";
@@ -67,6 +67,14 @@ server.listen(PORT, async () => {
   if (store.state.gateway.online) {
     console.log(`  gateway: ${gateway.config.baseUrl} - ${gateway.models.length} models (${gateway.models.filter((m) => m.free).length} free)`);
     broadcast({ type: "models", models: gateway.models });
+    // combos are an omniroute extra: ask once, quietly, and carry on without them
+    void syncCombos().then(() => {
+      const combos = store.state.gateway.combos ?? [];
+      if (combos.length) {
+        const live = store.state.gateway.activeCombo;
+        console.log(`  router: ${combos.length} combos${live ? `, live: ${live}` : ", none live"}`);
+      }
+    });
   } else {
     console.log(`  gateway: offline (${store.state.gateway.error}) - running in ghost mode`);
   }

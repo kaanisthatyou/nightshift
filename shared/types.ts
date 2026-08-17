@@ -153,6 +153,8 @@ export interface Task {
   costUsd: number;
   latencyMs: number;
   attempts: number;
+  /** times a provider said "not this minute" - a wait, not a failed attempt */
+  waits?: number;
   /** X-OmniRoute-Decision, i.e. which provider actually served it */
   decision: string | null;
   ghost: boolean;
@@ -228,6 +230,22 @@ export interface ModelInfo {
   label: string;
 }
 
+/**
+ * An OmniRoute routing combo: a pool of models it spreads requests across by a
+ * strategy. One is active at a time, and `auto` routes through it - which is how
+ * eight desks share one provider's rate limit instead of eight of them racing
+ * into the same 40 requests a minute.
+ */
+export interface ComboInfo {
+  id: string;
+  name: string;
+  strategy: string;
+  enabled: boolean;
+  active: boolean;
+  /** how many models the combo routes across, when the gateway says */
+  targets: number | null;
+}
+
 export interface GatewayStatus {
   online: boolean;
   baseUrl: string;
@@ -236,6 +254,9 @@ export interface GatewayStatus {
   lastCheck: number;
   error: string | null;
   version?: string;
+  /** null until the floor has managed to ask - an empty array means "asked, none" */
+  combos?: ComboInfo[] | null;
+  activeCombo?: string | null;
 }
 
 export interface FloorEvent {

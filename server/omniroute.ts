@@ -1,5 +1,5 @@
 // The gateway. Everything the floor knows about models comes through here.
-import type { GatewayStatus, ModelInfo } from "../shared/types.ts";
+import type { ComboInfo, GatewayStatus, ModelInfo } from "../shared/types.ts";
 
 export interface GatewayConfig {
   baseUrl: string;
@@ -31,6 +31,65 @@ export interface ChatResult {
 const FREE_HINTS = [
   ":free", "/free", "free/", "-free", "opencode", "kiro", "auto/best-free",
 ];
+
+/**
+ * A provider said "not this minute". It is not a failure: nothing is wrong with
+ * the task, the desk or the model, and counting it as one would burn a retry and
+ * a morale bar over a clock. It carries how long to wait.
+ */
+export class RateLimited extends Error {
+  waitMs: number;
+  status: number;
+  constructor(message: string, waitMs: number, status: number) {
+    super(message);
+    this.name = "RateLimited";
+    this.waitMs = waitMs;
+    this.status = status;
+  }
+}
+
+const MIN_WAIT_MS = 2_000;
+const MAX_WAIT_MS = 120_000;
+
+/**
+ * Retry-After is seconds or an HTTP date; OmniRoute and the providers behind it
+ * also hand back reset headers in seconds, milliseconds or an epoch. Read
+ * whichever is there and clamp it to something a shift can actually wait out.
+ */
+function waitFrom(res: Response): number {
+  const clamp = (ms: number) => Math.min(Math.max(ms, MIN_WAIT_MS), MAX_WAIT_MS);
+
+  const after = res.headers.get("retry-after");
+  if (after) {
+    const secs = Number(after);
+    if (Number.isFinite(secs)) return clamp(secs * 1000);
+    const when = Date.parse(after);
+    if (Number.isFinite(when)) return clamp(when - Date.now());
+  }
+
+  for (const key of ["x-ratelimit-reset-requests", "x-ratelimit-reset", "x-omniroute-retry-after"]) {
+    const raw = res.headers.get(key);
+    if (!raw) continue;
+    const n = Number(raw.replace(/[^\d.]/g, ""));
+    if (!Number.isFinite(n) || n <= 0) continue;
+    // an epoch, a millisecond count or a second count, in that order of size
+    if (n > 1e12) return clamp(n - Date.now());
+    if (n > 1e3) return clamp(n);
+    return clamp(n * 1000);
+  }
+  return clamp(15_000); // nobody said - a NIM minute window is the usual case
+}
+
+/** 429 always; a 503 that names a rate limit is the same thing wearing a hat. */
+function rateLimitOf(res: Response, body: string): RateLimited | null {
+  const limited = res.status === 429 || (res.status === 503 && /rate.?limit|too many requests/i.test(body));
+  if (!limited) return null;
+  return new RateLimited(
+    `rate limited (${res.status})${body ? `: ${body.slice(0, 160)}` : ""}`,
+    waitFrom(res),
+    res.status,
+  );
+}
 
 function num(v: unknown): number {
   const n = typeof v === "string" ? parseFloat(v) : typeof v === "number" ? v : 0;
@@ -77,6 +136,9 @@ export class Gateway {
   config: GatewayConfig;
   models: ModelInfo[] = [];
   status: GatewayStatus;
+  /** null until asked; kept here so a refresh cannot wipe what combos() found */
+  comboList: ComboInfo[] | null = null;
+  activeCombo: string | null = null;
 
   constructor(config: GatewayConfig) {
     this.config = config;
@@ -126,6 +188,8 @@ export class Gateway {
         modelCount: this.models.length,
         lastCheck: Date.now(),
         error: null,
+        combos: this.comboList,
+        activeCombo: this.activeCombo,
       };
     } catch (err: any) {
       this.status = {
@@ -135,9 +199,71 @@ export class Gateway {
         modelCount: this.models.length,
         lastCheck: Date.now(),
         error: err?.message ?? String(err),
+        combos: this.comboList,
+        activeCombo: this.activeCombo,
       };
     }
     return this.status;
+  }
+
+  /** The admin API sits at the gateway root; the OpenAI surface is the /v1 under it. */
+  private root(): string {
+    return this.config.baseUrl.replace(/\/+$/, "").replace(/\/v\d+$/, "");
+  }
+
+  /**
+   * OmniRoute's routing combos, and which one is live. A combo spreads requests
+   * across a pool of models, so a floor of eight desks stops being eight racers
+   * for one provider's per-minute quota. Anything that is not an OmniRoute
+   * simply has no such endpoint - that is not an error, just an empty toolbox.
+   */
+  async combos(): Promise<{ combos: ComboInfo[]; active: string | null }> {
+    const ask = async (path: string) => {
+      const res = await fetch(`${this.root()}${path}`, {
+        headers: this.headers(),
+        signal: AbortSignal.timeout(5000),
+      });
+      return res.ok ? await res.json().catch(() => null) : null;
+    };
+
+    const [list, settings] = await Promise.all([
+      ask("/api/combos").catch(() => null),
+      ask("/api/settings").catch(() => null),
+    ]);
+
+    const active: string | null = (settings as any)?.activeCombo ?? null;
+    const raw: any[] = Array.isArray(list) ? list : ((list as any)?.combos ?? []);
+    const combos = raw.map((c: any): ComboInfo => {
+      const name = String(c?.name ?? c?.id ?? "?");
+      const targets = c?.targets ?? c?.steps ?? c?.models;
+      return {
+        id: String(c?.id ?? name),
+        name,
+        strategy: String(c?.strategy ?? "priority"),
+        enabled: c?.enabled !== false,
+        active: active != null && (name === active || String(c?.id) === active),
+        targets: Array.isArray(targets) ? targets.length : null,
+      };
+    });
+    this.comboList = combos;
+    this.activeCombo = active;
+    this.status.combos = combos;
+    this.status.activeCombo = active;
+    return { combos, active };
+  }
+
+  /** Switch the live combo. It is a gateway-wide setting, not a per-desk one. */
+  async useCombo(name: string): Promise<void> {
+    const res = await fetch(`${this.root()}/api/settings`, {
+      method: "PATCH",
+      headers: this.headers(),
+      body: JSON.stringify({ activeCombo: name }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`gateway ${res.status}: ${body.slice(0, 200) || res.statusText}`);
+    }
   }
 
   priceOf(model: string): ModelInfo | undefined {
@@ -181,7 +307,7 @@ export class Gateway {
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`gateway ${res.status}: ${body.slice(0, 300) || res.statusText}`);
+      throw rateLimitOf(res, body) ?? new Error(`gateway ${res.status}: ${body.slice(0, 300) || res.statusText}`);
     }
     const json: any = await res.json();
     const choice = json?.choices?.[0]?.message ?? {};
@@ -242,7 +368,7 @@ export class Gateway {
 
     if (!res.ok || !res.body) {
       const body = await res.text().catch(() => "");
-      throw new Error(`gateway ${res.status}: ${body.slice(0, 300) || res.statusText}`);
+      throw rateLimitOf(res, body) ?? new Error(`gateway ${res.status}: ${body.slice(0, 300) || res.statusText}`);
     }
 
     const decision =

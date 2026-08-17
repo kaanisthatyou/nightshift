@@ -27,6 +27,49 @@ api.get("/models", async (req, res) => {
   res.json({ models: gateway.models, gateway: store.state.gateway });
 });
 
+/**
+ * Ask the gateway which routing combos it has and which one is live, and hang
+ * the answer off the gateway status. A gateway that is not an OmniRoute has no
+ * such endpoint - that leaves the list empty, which is not a failure.
+ */
+export async function syncCombos(): Promise<void> {
+  if (!store.state.gateway.online) return;
+  try {
+    const { combos, active } = await gateway.combos();
+    store.state.gateway.combos = combos;
+    store.state.gateway.activeCombo = active;
+    store.touch();
+  } catch {
+    store.state.gateway.combos = store.state.gateway.combos ?? null;
+  }
+}
+
+api.get("/combos", async (_req, res) => {
+  await syncCombos();
+  res.json({ combos: store.state.gateway.combos ?? [], active: store.state.gateway.activeCombo ?? null });
+});
+
+/**
+ * Switch the live combo. It is one setting on the gateway, not a per-desk one:
+ * every desk sitting on `auto` starts routing through whatever this names.
+ */
+api.post("/combos/use", async (req, res) => {
+  const name = String(req.body?.name ?? "").trim();
+  if (!name) return res.status(400).json({ error: "name required" });
+  try {
+    await gateway.useCombo(name);
+    await syncCombos();
+    store.emitEvent({
+      type: "gateway",
+      text: `router: ${name}`,
+      data: { activeCombo: name },
+    });
+    res.json({ combos: store.state.gateway.combos ?? [], active: store.state.gateway.activeCombo ?? null });
+  } catch (err: any) {
+    res.status(502).json({ error: err?.message ?? String(err) });
+  }
+});
+
 api.post("/gateway", async (req, res) => {
   const { baseUrl, apiKey } = req.body ?? {};
   gateway.setConfig({
@@ -34,6 +77,7 @@ api.post("/gateway", async (req, res) => {
     ...(typeof apiKey === "string" ? { apiKey } : {}),
   });
   store.state.gateway = await gateway.refresh();
+  void syncCombos();
   store.emitEvent({
     type: "gateway",
     text: store.state.gateway.online ? "gateway reconnected" : `gateway refused: ${store.state.gateway.error}`,

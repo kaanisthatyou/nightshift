@@ -1,5 +1,5 @@
 // The shift itself: who works on what, when, and what it costs.
-import { Gateway } from "./omniroute.ts";
+import { Gateway, RateLimited } from "./omniroute.ts";
 import { asOpenAiTools, mcp } from "./mcp.ts";
 import { store } from "./store.ts";
 import {
@@ -14,9 +14,15 @@ export const gateway = new Gateway({
   apiKey: process.env.OMNIROUTE_KEY || "",
 });
 
-/** Tasks the boss just walked over to: hold them until the walk animation lands. */
+/**
+ * Tasks the boss just walked over to: hold them until the walk animation lands.
+ * A rate-limited task parks in the same map, for as long as the provider said.
+ */
 const holdUntil = new Map<string, number>();
 export const THEATRE_MS = 2200;
+
+/** After this many waits in a row it is not a busy minute, it is a wall. */
+const RATE_WAIT_LIMIT = 4;
 
 const running = new Set<string>();
 
@@ -311,6 +317,48 @@ async function runTask(t: Task, w: Worker) {
     const missing = /model_not_found|no active credentials|not supported|invalid_api_key|40[14]/i.test(t.error ?? "");
     t.latencyMs = Date.now() - started;
     t.finishedAt = Date.now();
+
+    // A rate limit is a clock, not a failure. The desk takes a real coffee for
+    // exactly as long as the provider asked for, and the task waits with it -
+    // no retry spent, no morale lost, nothing marked failed.
+    if (err instanceof RateLimited && (t.waits ?? 0) < RATE_WAIT_LIMIT) {
+      t.waits = (t.waits ?? 0) + 1;
+      t.error = null;
+      t.stage = "queued";
+      holdUntil.set(t.id, Date.now() + err.waitMs);
+
+      // once is the minute window; twice is that model's quota, and the router
+      // (whatever combo omniroute has live) has other providers to spend
+      const toRouter = t.waits >= 2 && !t.modelOverride && model !== "auto" && gateway.status.online;
+      if (toRouter) {
+        t.modelOverride = "auto";
+        t.fallbackFrom = model;
+      }
+
+      const secs = Math.ceil(err.waitMs / 1000);
+      const line = toRouter ? `${secs}sn mola - kotam doldu, routera geciyorum` : `${secs}sn mola - kota doldu`;
+      store.setWorkerState(w.id, "coffee", line);
+      store.emitEvent({ type: "worker.say", workerId: w.id, taskId: t.id, text: line });
+      store.emitEvent({
+        type: "system",
+        taskId: t.id,
+        workerId: w.id,
+        text: toRouter
+          ? `${model} rate limited - ${secs}s, then the router takes it`
+          : `${model} rate limited - waiting ${secs}s`,
+        data: { rateLimited: true, waitMs: err.waitMs, model, toRouter },
+      });
+      // the desk comes back when the window does, not on the usual 2.6s timer
+      setTimeout(() => {
+        const back = store.worker(w.id);
+        if (back && back.state === "coffee") {
+          store.setWorkerState(back.id, "idle", null);
+          store.touch();
+        }
+      }, err.waitMs);
+      store.touch();
+      return;
+    }
 
     // The catalog lists models the provider will not actually serve. Hand the job to
     // OmniRoute's own router instead of failing - but say so, on the record.
