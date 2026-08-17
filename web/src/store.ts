@@ -1,8 +1,9 @@
 // One socket, one store. The scene reads it, the panels read it.
 import { create } from "zustand";
 import type { FloorEvent, FloorState, ModelInfo, ServerMessage } from "../../shared/types.ts";
+import type { CrewPreset, Temper } from "../../shared/presets.ts";
 
-export type Tab = "roster" | "board" | "arena" | "wire" | "gateway";
+export type Tab = "crew" | "plan" | "board" | "arena" | "wire" | "mains";
 
 interface UI {
   state: FloorState | null;
@@ -12,11 +13,18 @@ interface UI {
   selected: string | null;
   tab: Tab;
   openTask: string | null;
+  /** "new" opens a blank whiteboard; a plan id opens that plan; null closes it */
+  whiteboard: string | null;
+  /** text carried over when you send an order to the whiteboard instead of a desk */
+  seedIdea: string;
+  presets: CrewPreset[];
+  tempers: Temper[];
   /** live streamed text per task while a desk is typing */
   streams: Record<string, string>;
   setTab: (t: Tab) => void;
   select: (id: string | null) => void;
   openTaskPanel: (id: string | null) => void;
+  openWhiteboard: (id: string | null, idea?: string) => void;
 }
 
 export const useFloor = create<UI>((set) => ({
@@ -25,13 +33,28 @@ export const useFloor = create<UI>((set) => ({
   log: [],
   connected: false,
   selected: null,
-  tab: "roster",
+  tab: "crew",
   openTask: null,
+  whiteboard: null,
+  seedIdea: "",
+  presets: [],
+  tempers: [],
   streams: {},
   setTab: (t) => set({ tab: t }),
   select: (id) => set({ selected: id }),
   openTaskPanel: (id) => set({ openTask: id }),
+  openWhiteboard: (id, idea) => set({ whiteboard: id, ...(idea !== undefined ? { seedIdea: idea } : {}) }),
 }));
+
+/** The catalog never changes while the server is up, so it is fetched once. */
+export async function loadPresets() {
+  try {
+    const r = await api<{ presets: CrewPreset[]; tempers: Temper[] }>("/presets");
+    useFloor.setState({ presets: r.presets ?? [], tempers: r.tempers ?? [] });
+  } catch {
+    /* the catalog is cosmetic until you use it */
+  }
+}
 
 type EventHook = (e: FloorEvent) => void;
 const hooks: EventHook[] = [];
@@ -84,6 +107,7 @@ export function connect() {
     if (msg.type === "hello") {
       useFloor.setState({ state: msg.state, models: msg.models });
       api("/state").then((s: any) => useFloor.setState({ log: s.log ?? [] })).catch(() => {});
+      if (!useFloor.getState().presets.length) void loadPresets();
     } else if (msg.type === "state") {
       useFloor.setState({ state: msg.state });
     } else if (msg.type === "models") {

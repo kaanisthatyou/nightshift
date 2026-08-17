@@ -4,8 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
-  FloorEvent, FloorState, Job, Task, Worker, WorkerState,
+  FloorEvent, FloorState, Job, Plan, PlanStep, Task, Worker, WorkerState,
 } from "../shared/types.ts";
+import { buildPersona, roleSpec, TEMPERS } from "../shared/presets.ts";
 import { makeName, makeTitle } from "./flavor.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -19,6 +20,8 @@ function blankState(): FloorState {
     workers: [],
     tasks: [],
     jobs: [],
+    plans: [],
+    mcp: [],
     gateway: {
       online: false,
       baseUrl: "http://localhost:20128/v1",
@@ -36,6 +39,9 @@ function blankState(): FloorState {
       ghostMode: true,
       maxParallel: 4,
       defaultModel: "auto",
+      plannerModel: "auto",
+      mcpEnabled: true,
+      mcpMaxRounds: 6,
     },
   };
 }
@@ -52,14 +58,25 @@ class Store extends EventEmitter {
     try {
       if (fs.existsSync(STATE_FILE)) {
         const raw = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-        this.state = { ...blankState(), ...raw, gateway: { ...blankState().gateway, ...(raw.gateway ?? {}) } };
+        const base = blankState();
+        this.state = {
+          ...base,
+          ...raw,
+          plans: Array.isArray(raw.plans) ? raw.plans : [],
+          gateway: { ...base.gateway, ...(raw.gateway ?? {}) },
+          settings: { ...base.settings, ...(raw.settings ?? {}) },
+        };
         // nobody survives a restart mid-task
         for (const w of this.state.workers) {
           if (w.state !== "asleep") w.state = "idle";
           w.currentTaskId = null;
+          // desks hired before the toolbox existed carry no server list
+          if (!Array.isArray(w.mcpIds)) w.mcpIds = [];
+          if (!Array.isArray(w.mcpTools)) w.mcpTools = [];
         }
         for (const t of this.state.tasks) {
           if (t.stage === "running") { t.stage = "queued"; t.workerId = t.workerId ?? null; }
+          if (!Array.isArray(t.toolCalls)) t.toolCalls = [];
         }
         // a shift that ended hours ago is over - the clock starts at 22:00 again
         if (Date.now() - this.state.ledger.shiftStartedAt > 6 * 60 * 60 * 1000) {
@@ -120,15 +137,35 @@ class Store extends EventEmitter {
     return -1;
   }
 
-  hire(opts: { name?: string; model?: string; title?: string }): Worker | null {
+  hire(opts: {
+    name?: string;
+    model?: string;
+    title?: string;
+    presetId?: string | null;
+    roleKey?: string | null;
+    temper?: string | null;
+    persona?: string | null;
+    mcpIds?: string[];
+    mcpTools?: string[];
+  }): Worker | null {
     const desk = this.freeDesk();
     if (desk < 0) return null;
     const model = opts.model || this.state.settings.defaultModel;
+    const spec = roleSpec(opts.presetId, opts.roleKey);
+    // a desk with no personality is just a model with a name on it
+    const temperKey = opts.temper ?? TEMPERS[Math.floor(Math.random() * TEMPERS.length)].key;
+    const persona = opts.persona ?? (spec ? buildPersona(spec.persona, temperKey) : null);
     const worker: Worker = {
       id: id("w"),
       name: opts.name || makeName(new Set(this.state.workers.map((w) => w.name))),
-      title: opts.title || makeTitle(model),
+      title: opts.title || spec?.title || makeTitle(model),
       model,
+      mcpIds: Array.isArray(opts.mcpIds) ? opts.mcpIds : [],
+      mcpTools: Array.isArray(opts.mcpTools) ? opts.mcpTools : [],
+      presetId: opts.presetId ?? null,
+      role: spec?.key ?? opts.roleKey ?? null,
+      temper: temperKey,
+      persona,
       desk,
       seed: Math.floor(Math.random() * 1e9),
       state: "idle",
@@ -139,7 +176,12 @@ class Store extends EventEmitter {
       saying: null,
     };
     this.state.workers.push(worker);
-    this.emitEvent({ type: "worker.hired", workerId: worker.id, text: `${worker.name} clocks in as ${worker.title}` });
+    this.emitEvent({
+      type: "worker.hired",
+      workerId: worker.id,
+      text: `${worker.name} clocks in as ${worker.title}`,
+      data: { role: worker.role, temper: worker.temper, presetId: worker.presetId },
+    });
     this.touch();
     return worker;
   }
@@ -215,6 +257,8 @@ class Store extends EventEmitter {
       arenaId: null,
       wonArena: false,
       retriesLeft: 0,
+      planId: opts.planId ?? null,
+      toolCalls: [],
       ...("jobId" in opts ? { jobId: opts.jobId ?? null } : {}),
       ...("stepIndex" in opts ? { stepIndex: opts.stepIndex ?? 0 } : {}),
       ...("arenaId" in opts ? { arenaId: opts.arenaId ?? null } : {}),
@@ -247,6 +291,44 @@ class Store extends EventEmitter {
   job(jid: string | null | undefined): Job | undefined {
     return this.state.jobs.find((j) => j.id === jid);
   }
+
+  // ---- the whiteboard ------------------------------------------------
+
+  plan(pid: string | null | undefined): Plan | undefined {
+    return this.state.plans.find((p) => p.id === pid);
+  }
+
+  addPlan(p: Omit<Plan, "id" | "createdAt">): Plan {
+    const plan: Plan = { id: id("p"), createdAt: Date.now(), ...p };
+    this.state.plans.push(plan);
+    if (this.state.plans.length > 40) this.state.plans.splice(0, this.state.plans.length - 40);
+    this.emitEvent({
+      type: "plan.new",
+      text: plan.title,
+      data: { planId: plan.id, steps: plan.steps.length, ghost: plan.ghost },
+    });
+    this.touch();
+    return plan;
+  }
+
+  dropPlan(pid: string): boolean {
+    const i = this.state.plans.findIndex((p) => p.id === pid);
+    if (i < 0) return false;
+    this.state.plans.splice(i, 1);
+    this.touch();
+    return true;
+  }
 }
+
+export const blankStep = (over: Partial<PlanStep> = {}): PlanStep => ({
+  id: id("s"),
+  title: over.title ?? "new step",
+  prompt: over.prompt ?? "",
+  roleKey: over.roleKey ?? null,
+  workerId: over.workerId ?? null,
+  note: over.note ?? null,
+  enabled: over.enabled ?? true,
+  taskId: over.taskId ?? null,
+});
 
 export const store = new Store();

@@ -26,7 +26,7 @@ export default function FloorCanvas() {
 
     scene.onSelect = (id) => {
       select(id);
-      if (id) setTab("roster");
+      if (id) setTab("crew");
     };
     scene.onDeskOpen = (id) => {
       const s = useFloor.getState().state;
@@ -35,10 +35,10 @@ export default function FloorCanvas() {
         s?.tasks.find((t) => t.id === w?.currentTaskId) ??
         [...(s?.tasks ?? [])].reverse().find((t) => t.workerId === id);
       if (task) openTaskPanel(task.id);
-      else setTab("roster");
+      else setTab("crew");
     };
     scene.onTray = () => setTab("board");
-    scene.onEmptyDesk = () => setTab("roster");
+    scene.onEmptyDesk = () => setTab("crew");
     scene.onBossPoke = () => {
       void post("/boss/say", { text: POKES[Math.floor(Math.random() * POKES.length)] });
     };

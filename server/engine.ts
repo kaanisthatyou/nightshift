@@ -1,10 +1,13 @@
 // The shift itself: who works on what, when, and what it costs.
 import { Gateway } from "./omniroute.ts";
+import { asOpenAiTools, mcp } from "./mcp.ts";
 import { store } from "./store.ts";
 import {
   ACCEPT_LINES, COFFEE_LINE, DONE_LINES, FAIL_LINES, GHOST_NOTE, IDLE_LINES, fallbackLine, pick,
 } from "./flavor.ts";
-import type { Task, Worker } from "../shared/types.ts";
+import { HOUSE_RULES } from "../shared/presets.ts";
+import type { ChatResult } from "./omniroute.ts";
+import type { Task, ToolCall, Worker } from "../shared/types.ts";
 
 export const gateway = new Gateway({
   baseUrl: process.env.OMNIROUTE_URL || "http://localhost:20128/v1",
@@ -54,6 +57,158 @@ async function ghostRun(t: Task, onChunk: (s: string) => void) {
   return body;
 }
 
+/** Tool results can be enormous. A desk gets the useful head of one, not all of it. */
+const TOOL_RESULT_CAP = 6000;
+
+/**
+ * Which tools this desk may actually reach right now. A desk that named
+ * specific tools gets only those - handing a cheap model twenty-six schemas is
+ * how you get it to pick the wrong one.
+ */
+function deskTools(w: Worker) {
+  if (!store.state.settings.mcpEnabled) return [];
+  const all = mcp.toolsFor(w.mcpIds ?? []);
+  const picked = w.mcpTools ?? [];
+  if (!picked.length) return all;
+  return all.filter((t) => picked.includes(t.qualified) || picked.includes(t.name));
+}
+
+/**
+ * The tool loop. Runs the model, executes whatever it asked for, feeds the
+ * results back, and repeats until it answers in words or burns its rounds.
+ * With no tools on the desk this is a single pass and behaves exactly as before.
+ */
+async function converse(
+  t: Task,
+  w: Worker,
+  model: string,
+  system: string | null,
+  onChunk: (s: string) => void,
+): Promise<ChatResult> {
+  const tools = deskTools(w);
+  const defs = asOpenAiTools(tools);
+  const messages: any[] = [];
+  if (system) messages.push({ role: "system", content: system });
+  messages.push({ role: "user", content: t.sentPrompt ?? t.prompt });
+
+  const maxRounds = Math.max(1, store.state.settings.mcpMaxRounds || 6);
+  let last: ChatResult | null = null;
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let costUsd = 0;
+
+  for (let round = 0; round < maxRounds; round++) {
+    // the last round goes out without tools, so the desk has to write an answer
+    const offerTools = defs.length > 0 && round < maxRounds - 1;
+    const res = await gateway.chat({
+      model,
+      messages,
+      maxTokens: 1600,
+      signal: AbortSignal.timeout(180_000),
+      onChunk,
+      ...(offerTools ? { tools: defs } : {}),
+    });
+    // usage is per call - the task should show what the whole conversation cost
+    tokensIn += res.tokensIn;
+    tokensOut += res.tokensOut;
+    if (res.costUsd != null) costUsd += res.costUsd;
+    last = res;
+
+    if (!res.toolCalls.length) break;
+
+    messages.push({
+      role: "assistant",
+      content: res.text || null,
+      tool_calls: res.toolCalls.map((c) => ({
+        id: c.id,
+        type: "function",
+        function: { name: c.name, arguments: c.arguments || "{}" },
+      })),
+    });
+
+    for (const call of res.toolCalls) {
+      const record = await invoke(t, w, call.name, call.arguments);
+      messages.push({ role: "tool", tool_call_id: call.id, content: record.result });
+    }
+    // the desk goes back to thinking while the next round starts
+    store.setWorkerState(w.id, "thinking", null);
+  }
+
+  const totalCost = costUsd > 0 ? costUsd : null;
+  return {
+    text: last?.text ?? "",
+    tokensIn,
+    tokensOut,
+    decision: last?.decision ?? null,
+    model: last?.model ?? model,
+    ghost: false,
+    costUsd: totalCost,
+    toolCalls: [],
+    finishReason: last?.finishReason ?? null,
+  };
+}
+
+/** Run one tool call, record it on the task, and hand back what to tell the model. */
+async function invoke(t: Task, w: Worker, qualified: string, rawArgs: string): Promise<ToolCall> {
+  let args: Record<string, unknown> = {};
+  try {
+    args = rawArgs ? JSON.parse(rawArgs) : {};
+  } catch {
+    // small models hand back almost-JSON often enough to be worth saying so plainly
+    const rec: ToolCall = {
+      id: `tc_${t.toolCalls.length}`, server: "?", tool: qualified, args: {},
+      result: `arguments were not valid JSON: ${rawArgs.slice(0, 200)}`, ok: false, ms: 0,
+    };
+    t.toolCalls.push(rec);
+    store.touch();
+    return rec;
+  }
+
+  const tool = mcp.find(qualified, w.mcpIds ?? []);
+  const started = Date.now();
+  if (!tool) {
+    const rec: ToolCall = {
+      id: `tc_${t.toolCalls.length}`, server: "?", tool: qualified, args,
+      result: `no such tool: ${qualified}`, ok: false, ms: 0,
+    };
+    t.toolCalls.push(rec);
+    store.touch();
+    return rec;
+  }
+
+  store.setWorkerState(w.id, "delivering", `${tool.name}...`);
+  store.emitEvent({
+    type: "tool.call", workerId: w.id, taskId: t.id,
+    text: tool.qualified, data: { server: tool.server, tool: tool.name, args },
+  });
+
+  let result: string;
+  let ok: boolean;
+  try {
+    result = await mcp.call(tool, args);
+    ok = true;
+  } catch (err: any) {
+    result = `tool failed: ${err?.message ?? String(err)}`;
+    ok = false;
+  }
+  if (result.length > TOOL_RESULT_CAP) {
+    result = `${result.slice(0, TOOL_RESULT_CAP)}\n...[truncated ${result.length - TOOL_RESULT_CAP} chars]`;
+  }
+
+  const rec: ToolCall = {
+    id: `tc_${t.toolCalls.length}`,
+    server: tool.server, tool: tool.name, args, result, ok, ms: Date.now() - started,
+  };
+  t.toolCalls.push(rec);
+  store.emitEvent({
+    type: "tool.result", workerId: w.id, taskId: t.id,
+    text: `${tool.qualified} ${ok ? "ok" : "failed"}`,
+    data: { server: tool.server, tool: tool.name, ok, ms: rec.ms, preview: result.slice(0, 300) },
+  });
+  store.touch();
+  return rec;
+}
+
 async function runTask(t: Task, w: Worker) {
   running.add(t.id);
   w.currentTaskId = t.id;
@@ -64,6 +219,7 @@ async function runTask(t: Task, w: Worker) {
   t.startedAt = Date.now();
   t.output = "";
   t.error = null;
+  t.toolCalls = [];
   t.sentPrompt = resolvePrompt(t, previousOutput(t));
   const accept = pick(ACCEPT_LINES);
   store.setStage(t.id, "running");
@@ -98,21 +254,19 @@ async function runTask(t: Task, w: Worker) {
   try {
     let result;
     if (gateway.status.online) {
-      result = await gateway.chat({
-        model,
-        prompt: t.sentPrompt,
-        system:
-          t.system ??
-          "You are a worker on a night shift. Do exactly the task you are given, nothing more. " +
-            "Be concise and concrete. No preamble, no sign-off. " +
-            "Answer in the same language the task is written in.",
-        signal: AbortSignal.timeout(180_000),
+      result = await converse(
+        t, w, model,
+        // an explicit system on the task wins; otherwise the desk answers as itself
+        t.system ?? w.persona ?? HOUSE_RULES,
         onChunk,
-      });
+      );
       t.ghost = false;
     } else if (store.state.settings.ghostMode) {
       const text = await ghostRun(t, onChunk);
-      result = { text, tokensIn: 0, tokensOut: 0, decision: "ghost", model: `${model} (ghost)`, ghost: true };
+      result = {
+        text, tokensIn: 0, tokensOut: 0, decision: "ghost",
+        model: `${model} (ghost)`, ghost: true, toolCalls: [], finishReason: "stop",
+      };
       t.ghost = true;
     } else {
       throw new Error("gateway offline and ghost mode is off");
@@ -205,6 +359,7 @@ async function runTask(t: Task, w: Worker) {
     const job = store.job(t.jobId);
     if (job && job.kind === "pipeline") {
       job.stage = "failed";
+      settlePlan(job.id, "failed");
       store.emitEvent({ type: "job.done", text: `${job.title} broke down`, data: { jobId: job.id, ok: false } });
     }
   } finally {
@@ -245,6 +400,7 @@ function advanceJob(t: Task) {
     if (!open.length) {
       const failed = tasks.filter((x) => x.stage === "failed").length;
       job.stage = failed ? "failed" : "done";
+      settlePlan(job.id, failed ? "failed" : "done");
       store.emitEvent({
         type: "job.done",
         text: `${job.title}: ${tasks.length - failed}/${tasks.length} geldi`,
@@ -265,9 +421,18 @@ function advanceJob(t: Task) {
     }
   } else {
     job.stage = "done";
+    settlePlan(job.id, "done");
     store.emitEvent({ type: "job.done", text: `${job.title} cleared the floor`, data: { jobId: job.id, ok: true } });
     store.touch();
   }
+}
+
+/** A plan is done when the job it was cut into is done. */
+function settlePlan(jobId: string, status: "done" | "failed") {
+  const plan = store.state.plans.find((p) => p.jobId === jobId);
+  if (!plan || plan.status !== "running") return;
+  plan.status = status;
+  store.touch();
 }
 
 /** Work landing on a sleeping desk wakes it up - the boss is standing right there. */

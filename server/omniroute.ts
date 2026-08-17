@@ -6,6 +6,14 @@ export interface GatewayConfig {
   apiKey: string;
 }
 
+/** A tool the model asked for, reassembled from the stream. */
+export interface WireToolCall {
+  id: string;
+  name: string;
+  /** raw JSON string as the model wrote it - may not parse */
+  arguments: string;
+}
+
 export interface ChatResult {
   text: string;
   tokensIn: number;
@@ -15,6 +23,9 @@ export interface ChatResult {
   ghost: boolean;
   /** what the gateway itself billed, when it says so - beats our own arithmetic */
   costUsd?: number | null;
+  /** set when the model wants tools instead of answering */
+  toolCalls: WireToolCall[];
+  finishReason: string | null;
 }
 
 const FREE_HINTS = [
@@ -140,18 +151,17 @@ export class Gateway {
   }
 
   /**
-   * Streaming chat completion. onChunk gets raw deltas so the floor can watch
-   * a worker actually type. Returns totals when the stream closes.
+   * One-shot, no streaming. Used by the planner, which wants an answer rather
+   * than a performance. Returns the raw text.
    */
-  async chat(opts: {
+  async complete(opts: {
     model: string;
     prompt: string;
     system?: string | null;
     maxTokens?: number;
     temperature?: number;
     signal?: AbortSignal;
-    onChunk?: (text: string) => void;
-  }): Promise<ChatResult> {
+  }): Promise<{ text: string; model: string; tokensIn: number; tokensOut: number; costUsd: number }> {
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const messages: any[] = [];
     if (opts.system) messages.push({ role: "system", content: opts.system });
@@ -164,10 +174,69 @@ export class Gateway {
       body: JSON.stringify({
         model: opts.model,
         messages,
+        stream: false,
+        temperature: opts.temperature ?? 0.5,
+        max_tokens: opts.maxTokens ?? 2200,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`gateway ${res.status}: ${body.slice(0, 300) || res.statusText}`);
+    }
+    const json: any = await res.json();
+    const choice = json?.choices?.[0]?.message ?? {};
+    const text: string = (choice.content ?? choice.reasoning_content ?? choice.reasoning ?? "").toString();
+    const tokensIn = num(json?.usage?.prompt_tokens) || Math.ceil(opts.prompt.length / 4);
+    const tokensOut = num(json?.usage?.completion_tokens) || Math.ceil(text.length / 4);
+    const served = json?.model ?? opts.model;
+    const headerCost = num(res.headers.get("x-omniroute-response-cost"));
+    return {
+      text,
+      model: served,
+      tokensIn,
+      tokensOut,
+      costUsd: headerCost > 0 ? headerCost : this.costFor(served, tokensIn, tokensOut),
+    };
+  }
+
+  /**
+   * Streaming chat completion. onChunk gets raw deltas so the floor can watch
+   * a worker actually type. Returns totals when the stream closes.
+   */
+  async chat(opts: {
+    model: string;
+    /** either a bare prompt, or the whole conversation when a tool loop is running */
+    prompt?: string;
+    messages?: any[];
+    system?: string | null;
+    maxTokens?: number;
+    temperature?: number;
+    signal?: AbortSignal;
+    onChunk?: (text: string) => void;
+    /** OpenAI-shaped tool definitions; omitted entirely when the desk has none */
+    tools?: unknown[];
+  }): Promise<ChatResult> {
+    const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    const messages: any[] = [];
+    if (opts.messages) {
+      messages.push(...opts.messages);
+    } else {
+      if (opts.system) messages.push({ role: "system", content: opts.system });
+      messages.push({ role: "user", content: opts.prompt ?? "" });
+    }
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      signal: opts.signal,
+      body: JSON.stringify({
+        model: opts.model,
+        messages,
         stream: true,
         stream_options: { include_usage: true },
         temperature: opts.temperature ?? 0.4,
         max_tokens: opts.maxTokens ?? 1600,
+        ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}),
       }),
     });
 
@@ -190,6 +259,9 @@ export class Gateway {
     let tokensIn = 0;
     let tokensOut = 0;
     let servedModel = res.headers.get("x-omniroute-model") || opts.model;
+    let finishReason: string | null = null;
+    // tool calls arrive as fragments keyed by index; arguments are streamed a few chars at a time
+    const toolAcc = new Map<number, { id: string; name: string; arguments: string }>();
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -218,6 +290,24 @@ export class Gateway {
             reasoning += think;
             opts.onChunk?.(think);
           }
+          for (const tc of json?.choices?.[0]?.delta?.tool_calls ?? []) {
+            const idx = typeof tc.index === "number" ? tc.index : toolAcc.size;
+            const slot = toolAcc.get(idx) ?? { id: "", name: "", arguments: "" };
+            if (tc.id) slot.id = tc.id;
+            if (tc.function?.name) slot.name = tc.function.name;
+            if (typeof tc.function?.arguments === "string") slot.arguments += tc.function.arguments;
+            toolAcc.set(idx, slot);
+          }
+          // some gateways only ever send the finished call, not deltas
+          for (const tc of json?.choices?.[0]?.message?.tool_calls ?? []) {
+            const idx = toolAcc.size;
+            toolAcc.set(idx, {
+              id: tc.id ?? "",
+              name: tc.function?.name ?? "",
+              arguments: typeof tc.function?.arguments === "string" ? tc.function.arguments : "",
+            });
+          }
+          if (json?.choices?.[0]?.finish_reason) finishReason = json.choices[0].finish_reason;
           if (json?.model) servedModel = json.model;
           if (json?.usage) {
             tokensIn = json.usage.prompt_tokens ?? tokensIn;
@@ -233,8 +323,14 @@ export class Gateway {
     const body = text.trim() || reasoning.trim();
 
     // Usage can arrive in the stream, in the headers, or not at all - fall back in that order.
-    if (!tokensIn) tokensIn = headerIn || Math.ceil((opts.prompt.length + (opts.system?.length ?? 0)) / 4);
+    // messages is the real payload whether it came from a prompt or a tool loop
+    if (!tokensIn) tokensIn = headerIn || Math.ceil(JSON.stringify(messages).length / 4);
     if (!tokensOut) tokensOut = headerOut || Math.ceil(body.length / 4);
+
+    const toolCalls: WireToolCall[] = [...toolAcc.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([, v], i) => ({ id: v.id || `call_${i}`, name: v.name, arguments: v.arguments }))
+      .filter((c) => c.name);
 
     return {
       text: body,
@@ -244,6 +340,8 @@ export class Gateway {
       model: servedModel,
       ghost: false,
       costUsd: headerCost > 0 ? headerCost : null,
+      toolCalls,
+      finishReason,
     };
   }
 }

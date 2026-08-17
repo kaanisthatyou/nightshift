@@ -13,6 +13,8 @@ export default function OrderBar() {
   const state = useFloor((s) => s.state);
   const selected = useFloor((s) => s.selected);
   const select = useFloor((s) => s.select);
+  const openWhiteboard = useFloor((s) => s.openWhiteboard);
+  const setTab = useFloor((s) => s.setTab);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [ph] = useState(() => PLACEHOLDERS[Math.floor(Math.random() * PLACEHOLDERS.length)]);
@@ -64,6 +66,16 @@ export default function OrderBar() {
           if (e.key === "Enter") void send();
         }}
       />
+      <button
+        className="btn"
+        title="too big for one desk? put it on the whiteboard and cut it up first"
+        onClick={() => {
+          setTab("plan");
+          openWhiteboard("new", text);
+        }}
+      >
+        plan it
+      </button>
       <button className="btn primary" onClick={() => void send()} disabled={sending || !text.trim()}>
         {sending ? "walking..." : "give order"}
       </button>

@@ -1,214 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { del, patch, post, useFloor, type Tab } from "../store.ts";
-import Portrait from "./Portrait.tsx";
+import { useState } from "react";
+import { post, useFloor, type Tab } from "../store.ts";
 import Arena from "./Arena.tsx";
-import type { ModelInfo, Task, Worker } from "../../../shared/types.ts";
+import Crew from "./Crew.tsx";
+import Plans from "./Plans.tsx";
+import ModelSelect from "./ModelSelect.tsx";
+import type { ModelInfo, Task } from "../../../shared/types.ts";
 
 const fmtCost = (c: number) => (c === 0 ? "$0" : c < 0.001 ? `$${c.toFixed(6)}` : `$${c.toFixed(4)}`);
 const fmtMs = (ms: number) => (ms > 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
-
-function ModelSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const models = useFloor((s) => s.models);
-  const free = models.filter((m) => m.free);
-  const unpriced = models.filter((m) => m.unpriced);
-  const paid = models.filter((m) => !m.free && !m.unpriced);
-  return (
-    <select className="grow" value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="auto">auto (let omniroute pick)</option>
-      {!models.length && <option value={value}>{value}</option>}
-      {free.length > 0 && (
-        <optgroup label={`free · ${free.length}`}>
-          {free.map((m) => (
-            <option key={m.id} value={m.id}>{m.id}</option>
-          ))}
-        </optgroup>
-      )}
-      {unpriced.length > 0 && (
-        <optgroup label={`no price reported · ${unpriced.length}`}>
-          {unpriced.map((m) => (
-            <option key={m.id} value={m.id}>{m.id}</option>
-          ))}
-        </optgroup>
-      )}
-      {paid.length > 0 && (
-        <optgroup label={`paid · ${paid.length}`}>
-          {paid.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.id} · ${m.promptCost.toFixed(2)}/M
-            </option>
-          ))}
-        </optgroup>
-      )}
-    </select>
-  );
-}
-
-function Pips({ value }: { value: number }) {
-  const cells = 10;
-  const filled = Math.max(0, Math.min(cells, Math.round((value / 100) * cells)));
-  const tone = value < 35 ? "low" : value < 65 ? "mid" : "";
-  return (
-    <span className={`pips ${tone}`}>
-      {Array.from({ length: cells }, (_, i) => (
-        <i key={i} className={i < filled ? "on" : ""} />
-      ))}
-    </span>
-  );
-}
-
-function WorkerCard({ w }: { w: Worker }) {
-  const selected = useFloor((s) => s.selected);
-  const select = useFloor((s) => s.select);
-  const state = useFloor((s) => s.state);
-  const models = useFloor((s) => s.models);
-  const cardRef = useRef<HTMLDivElement>(null);
-
-  // clicking a desk on the floor should bring its file into view
-  useEffect(() => {
-    if (selected === w.id) cardRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [selected, w.id]);
-  const task = state?.tasks.find((t) => t.id === w.currentTaskId);
-  const unknownModel = models.length > 0 && w.model !== "auto" && !models.some((m) => m.id === w.model);
-  const avg = w.stats.tasksDone ? Math.round(w.stats.msTotal / w.stats.tasksDone) : 0;
-
-  return (
-    <div ref={cardRef} className={`file ${selected === w.id ? "sel" : ""}`} onClick={() => select(w.id)}>
-      <div className="file-head">
-        <Portrait worker={w} />
-        <div className="grow" style={{ minWidth: 0 }}>
-          <div className="name ell">{w.name}</div>
-          <div className="sub ell" style={{ marginBottom: 5 }}>
-            {w.title} · desk {w.desk + 1}
-          </div>
-          <div className="strip">
-            <ModelSelect value={w.model} onChange={(v) => void patch(`/workers/${w.id}`, { model: v })} />
-          </div>
-        </div>
-        <span className={`stamp state-${w.state}`}>{w.state}</span>
-      </div>
-
-      {unknownModel && (
-        <div className="warn" title="the gateway does not list this model - it will fail until you pick another or add credentials in omniroute">
-          ! not on the board
-        </div>
-      )}
-
-      <div className="file-row">
-        <span className="k">morale</span>
-        <Pips value={w.morale} />
-        <span className="v">{w.morale}</span>
-      </div>
-
-      <div className="file-row stats">
-        <span className="ok">✓{w.stats.tasksDone}</span>
-        <span className="bad">✗{w.stats.tasksFailed}</span>
-        <span className="sep" />
-        <span>{(w.stats.tokensIn + w.stats.tokensOut).toLocaleString()} tok</span>
-        <span className="sep" />
-        <span>{fmtCost(w.stats.costUsd)}</span>
-        {avg > 0 && (
-          <>
-            <span className="sep" />
-            <span>{fmtMs(avg)}</span>
-          </>
-        )}
-      </div>
-
-      {task && <div className="now ell">▸ {task.title}</div>}
-      {w.saying && <div className="quote ell">{w.saying}</div>}
-
-      <div className="file-actions">
-        <button
-          className="btn mini"
-          onClick={(e) => {
-            e.stopPropagation();
-            void patch(`/workers/${w.id}`, { state: w.state === "asleep" ? "idle" : "asleep" });
-          }}
-        >
-          {w.state === "asleep" ? "wake" : "send to sleep"}
-        </button>
-        <span className="grow" />
-        <button
-          className="btn mini danger"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (confirm(`fire ${w.name}?`)) void del(`/workers/${w.id}`);
-          }}
-        >
-          fire
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function Roster() {
-  const state = useFloor((s) => s.state);
-  const models = useFloor((s) => s.models);
-  const [hireModel, setHireModel] = useState("auto");
-  const full = (state?.workers.length ?? 0) >= 8;
-
-  const suggestion = useMemo(() => {
-    const free = models.filter((m) => m.free);
-    if (free.length) return free[0].id;
-    const unpriced = models.filter((m) => m.unpriced);
-    return unpriced.length ? unpriced[0].id : "auto";
-  }, [models]);
-
-  return (
-    <>
-      <div className="file form">
-        <div className="form-title">
-          staff requisition <span className="form-no">no. {String((state?.workers.length ?? 0) + 1).padStart(3, "0")}</span>
-        </div>
-        <label className="form-line">
-          <span className="k">model</span>
-          <span className="strip grow">
-            <ModelSelect value={hireModel} onChange={setHireModel} />
-          </span>
-        </label>
-        <label className="form-line">
-          <span className="k">desks</span>
-          <span className="desk-dots">
-            {Array.from({ length: 8 }, (_, i) => (
-              <i key={i} className={state?.workers.some((w) => w.desk === i) ? "taken" : ""} />
-            ))}
-          </span>
-          <span className="v">{state?.workers.length ?? 0}/8</span>
-        </label>
-        <div className="file-actions">
-          <button className="btn mini" onClick={() => setHireModel(suggestion)} title="first free model on the board">
-            cheapest hand
-          </button>
-          <button
-            className="btn mini"
-            disabled={!state?.workers.length}
-            title="morale +10 for everyone. it works every time."
-            onClick={() => void post("/office", { kind: "pizza" })}
-          >
-            order pizza
-          </button>
-          <span className="grow" />
-          <button className="btn primary mini" disabled={full} onClick={() => void post("/workers", { model: hireModel })}>
-            {full ? "floor is full" : "sign them"}
-          </button>
-        </div>
-      </div>
-      {state?.workers.length ? (
-        state.workers
-          .slice()
-          .sort((a, b) => a.desk - b.desk)
-          .map((w) => <WorkerCard key={w.id} w={w} />)
-      ) : (
-        <div className="empty">
-          the floor is empty.
-          <br />
-          sign someone and give them an order.
-        </div>
-      )}
-    </>
-  );
-}
 
 const STAMP: Record<string, string> = {
   done: "approved",
@@ -606,6 +405,15 @@ function GatewayPanel() {
           <span className="grow">ghost shift when the gateway is down</span>
         </label>
         <div className="form-line" style={{ marginTop: 8 }}>
+          <span className="k">planner</span>
+          <span className="strip grow" title="the model that drafts plans on the whiteboard - worth a smarter one than the desks">
+            <ModelSelect
+              value={state?.settings.plannerModel ?? "auto"}
+              onChange={(v) => void post("/settings", { plannerModel: v })}
+            />
+          </span>
+        </div>
+        <div className="form-line">
           <span className="k">at once</span>
           <span className="desk-dots grow">
             {Array.from({ length: 8 }, (_, i) => (
@@ -652,11 +460,12 @@ function GatewayPanel() {
 }
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "roster", label: "roster" },
+  { id: "crew", label: "crew" },
+  { id: "plan", label: "plan" },
   { id: "board", label: "board" },
   { id: "arena", label: "arena" },
   { id: "wire", label: "wire" },
-  { id: "gateway", label: "gateway" },
+  { id: "mains", label: "mains" },
 ];
 
 export default function Rail() {
@@ -664,6 +473,7 @@ export default function Rail() {
   const setTab = useFloor((s) => s.setTab);
   const state = useFloor((s) => s.state);
   const reviewCount = state?.tasks.filter((t) => t.stage === "review").length ?? 0;
+  const draftCount = state?.plans.filter((p) => p.status === "draft").length ?? 0;
 
   return (
     <aside className="rail">
@@ -672,16 +482,18 @@ export default function Rail() {
           <button key={t.id} className={`tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
             {t.label}
             {t.id === "board" && reviewCount > 0 && <span className="dot"> ●{reviewCount}</span>}
-            {t.id === "gateway" && !state?.gateway.online && <span className="dot"> ●</span>}
+            {t.id === "plan" && draftCount > 0 && <span className="dot"> ●{draftCount}</span>}
+            {t.id === "mains" && !state?.gateway.online && <span className="dot"> ●</span>}
           </button>
         ))}
       </div>
       <div className="rail-body" style={tab === "wire" ? { padding: 6 } : undefined}>
-        {tab === "roster" && <Roster />}
+        {tab === "crew" && <Crew />}
+        {tab === "plan" && <Plans />}
         {tab === "board" && <Board />}
         {tab === "arena" && <Arena />}
         {tab === "wire" && <Wire />}
-        {tab === "gateway" && <GatewayPanel />}
+        {tab === "mains" && <GatewayPanel />}
       </div>
     </aside>
   );
