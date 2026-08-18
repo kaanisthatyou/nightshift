@@ -4,16 +4,26 @@
 // It is one call to the gateway that returns JSON, which is why it uses
 // gateway.complete() rather than the streaming chat the workers use.
 
+import fs from "node:fs";
+import path from "node:path";
 import { dispatch, gateway, wake } from "./engine.ts";
 import { store, blankStep } from "./store.ts";
 import { PRESETS, preset, roleSpec } from "../shared/presets.ts";
+import { openWorkspace, tree } from "./workspace.ts";
 import type { Plan, PlanStep, Worker } from "../shared/types.ts";
 
 const PLANNER_SYSTEM =
   "You are the night shift planner. You do not do the work - you cut it into pieces other desks can do. " +
   "You answer with JSON and nothing else: no prose, no markdown fence, no explanation.";
 
-/** Models sometimes wrap JSON in a fence, or in an apology. Dig it out. */
+/**
+ * Models sometimes wrap JSON in a fence, or in an apology. Dig it out.
+ *
+ * Cheap models get it almost right often enough that "almost" is worth
+ * handling: a trailing comma before a brace, a // note the model could not
+ * resist. Those are repaired rather than thrown away - a plan lost to a stray
+ * comma is a whole minute of a free model's day for nothing.
+ */
 export function extractJson(raw: string): any {
   const text = raw.trim();
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -21,7 +31,21 @@ export function extractJson(raw: string): any {
   const start = body.indexOf("{");
   const end = body.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("the planner did not return JSON");
-  return JSON.parse(body.slice(start, end + 1));
+  const slice = body.slice(start, end + 1);
+  try {
+    return JSON.parse(slice);
+  } catch (first) {
+    const repaired = slice
+      // a // comment, but not the // inside a "http://..." string
+      .replace(/(^|[^:"'\\])\/\/[^\n"]*/g, "$1")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/,(\s*[}\]])/g, "$1");
+    try {
+      return JSON.parse(repaired);
+    } catch {
+      throw first; // say what was actually wrong with what it sent
+    }
+  }
 }
 
 function rosterFor(presetId: string | null): string {
@@ -75,6 +99,87 @@ function draftPrompt(idea: string, presetId: string | null, count: number): stri
     .join("\n");
 }
 
+/**
+ * What the folder looks like right now, in the few hundred lines a planner
+ * can actually use. An empty folder is worth saying out loud - it changes the
+ * plan from "extend this" to "start it".
+ */
+function survey(root: string): string {
+  let listing: string[] = [];
+  try {
+    listing = tree(root, ".", 200);
+  } catch {
+    listing = [];
+  }
+  if (!listing.length) return "The folder is empty. Nothing exists yet - the plan has to create the project from nothing.";
+
+  const parts = [`The folder already contains ${listing.length} entries:`, listing.join("\n")];
+  // a manifest tells the planner the stack, the scripts and the deps in one read
+  for (const name of ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod"]) {
+    const hit = listing.find((l) => l.split(/\s+/)[0] === name);
+    if (!hit) continue;
+    try {
+      const body = fs.readFileSync(path.join(root, name), "utf8");
+      parts.push(`\n${name}:\n${body.slice(0, 1800)}`);
+    } catch {
+      /* unreadable - the listing is still worth something */
+    }
+    break;
+  }
+  return parts.join("\n");
+}
+
+/**
+ * The build brief. This is a different job from cutting an idea into essays:
+ * the steps have to divide a filesystem, and anything crossing a file boundary
+ * has to be pinned down here, because the desks cannot talk to each other.
+ */
+function buildDraftPrompt(idea: string, root: string, presetId: string | null, count: number): string {
+  return [
+    `The floor is working inside a real project folder: ${root}`,
+    "",
+    survey(root),
+    "",
+    "Cut the idea below into steps that WRITE FILES into that folder.",
+    "",
+    "Each step is done by one small, cheap model that has exactly six tools:",
+    "list_files, read_file, write_file, edit_file, run (build tooling only), finish.",
+    "",
+    "Rules:",
+    `- ${count} steps at most. Fewer is better - a step that writes three related files beats three steps.`,
+    "- Every step must list, in `files`, the exact paths it owns. Two steps must never claim the same path;",
+    "  the floor refuses a write outside a step's own list, so an overlap becomes a blocked desk.",
+    "- Between them the steps must cover a project that actually runs: entry point, config, dependency",
+    "  manifest, and anything the entry point imports. Nothing may be left 'to be added later'.",
+    "- The desks cannot see each other's work while they write. So pin every shared contract in `summary`:",
+    "  exact file paths, exported names, function signatures, route paths, data shapes. Then repeat the",
+    "  relevant half of that contract inside the prompt of every step that touches it.",
+    "- Each step's prompt stands on its own: which files to create, what goes in each, and what it may assume",
+    "  already exists. Write it as an instruction to a competent junior, not as a summary.",
+    "- If the folder has no project skeleton yet, the first step creates it - manifest, config, folder layout.",
+    "- Prefer the runtime's own tooling and zero extra dependencies. A plain `node test.js` that a desk can actually",
+    "  make pass beats a jest-and-typescript setup that four small models have to configure between them.",
+    "- `verify` is one command that proves the whole thing works when run in that folder, e.g. `npm run build`,",
+    "  `npm test`, `node index.js --check`, `pytest -q`, `tsc --noEmit`. It must be real: a command the plan's own",
+    "  files make runnable. If nothing sensible can be checked, use an empty string.",
+    "- No step may be 'review', 'coordinate' or 'document the plan'. Every step leaves files on disk.",
+    "",
+    "Roster:",
+    rosterFor(presetId),
+    "",
+    "Idea:",
+    idea,
+    "",
+    "Return exactly this JSON shape:",
+    '{"title":"short name for the whole thing",' +
+    '"summary":"the approach, and the exact shared contract every step must obey",' +
+    '"verify":"the one command that proves it works",' +
+    '"steps":[{"title":"short step name","prompt":"the full self-contained instruction",' +
+    '"roleKey":"key from the roster","files":["exact/path.ts","another/path.ts"],' +
+    '"note":"why this step exists, one short line"}]}',
+  ].join("\n");
+}
+
 function expandPrompt(step: PlanStep, plan: Plan, count: number): string {
   return [
     `This is one step out of a plan called "${plan.title}".`,
@@ -99,6 +204,7 @@ function expandPrompt(step: PlanStep, plan: Plan, count: number): string {
 
 function coerceSteps(raw: any, presetId: string | null): PlanStep[] {
   const list = Array.isArray(raw?.steps) ? raw.steps : [];
+  const taken = new Set<string>();
   return list
     .map((s: any) => {
       const prompt = String(s?.prompt ?? "").trim();
@@ -106,11 +212,22 @@ function coerceSteps(raw: any, presetId: string | null): PlanStep[] {
       const roleKey = typeof s?.roleKey === "string" ? s.roleKey.trim() : null;
       // a key the model invented is worse than no key at all - it would route nowhere
       const known = roleKey && (roleSpec(presetId, roleKey) || store.state.workers.some((w) => w.role === roleKey));
+      // a planner that names the same file twice would deadlock two desks against
+      // each other, so the first claim on a path wins and the rest is dropped
+      const claims = (Array.isArray(s?.files) ? s.files : Array.isArray(s?.claims) ? s.claims : [])
+        .map((f: any) => String(f ?? "").trim().replace(/^\.\//, "").replace(/^[\\/]+/, ""))
+        .filter(Boolean)
+        .filter((f: string) => {
+          if (taken.has(f)) return false;
+          taken.add(f);
+          return true;
+        });
       return blankStep({
         title: String(s?.title ?? prompt.split("\n")[0]).slice(0, 70),
         prompt,
         roleKey: known ? roleKey : null,
         note: s?.note ? String(s.note).slice(0, 160) : null,
+        claims,
       });
     })
     .filter(Boolean) as PlanStep[];
@@ -129,6 +246,7 @@ function ghostSteps(idea: string, presetId: string | null): PlanStep[] {
         "(This step was written by the offline whiteboard, not by a model. Edit it before sending it down.)",
       roleKey: r.key,
       note: "drafted offline - the gateway was not reachable",
+      claims: [],
     }),
   );
 }
@@ -145,11 +263,19 @@ export async function draftPlan(opts: {
   title?: string | null;
   steps?: number;
   model?: string | null;
+  /** set to plan against a real folder - this is what makes it a build plan */
+  workspace?: string | null;
+  /** override the check the planner would have picked itself */
+  verify?: string | null;
 }): Promise<DraftResult> {
   const idea = opts.idea.trim();
   const presetId = opts.presetId ?? null;
   const count = Math.max(2, Math.min(10, Number(opts.steps) || 5));
   const model = opts.model || store.state.settings.plannerModel || store.state.settings.defaultModel;
+  // resolving the folder here means a bad path is an error on the whiteboard,
+  // not eight desks discovering it one at a time
+  const ws = opts.workspace ? openWorkspace(opts.workspace) : null;
+  const kind: Plan["kind"] = ws ? "build" : "text";
 
   store.emitEvent({
     type: "boss.say",
@@ -170,6 +296,9 @@ export async function draftPlan(opts: {
       jobId: null,
       draftedBy: "ghost",
       ghost: true,
+      kind,
+      workspace: ws?.root ?? null,
+      verify: opts.verify ?? null,
     });
     return { plan, costUsd: 0 };
   }
@@ -177,10 +306,12 @@ export async function draftPlan(opts: {
   const res = await gateway.complete({
     model,
     system: PLANNER_SYSTEM,
-    prompt: draftPrompt(idea, presetId, count),
-    temperature: 0.6,
-    maxTokens: 2600,
-    signal: AbortSignal.timeout(120_000),
+    prompt: ws ? buildDraftPrompt(idea, ws.root, presetId, count) : draftPrompt(idea, presetId, count),
+    temperature: ws ? 0.35 : 0.6,
+    // a build plan carries the shared contract and a paragraph per step; it does
+    // not fit in the budget a list of essay prompts needs
+    maxTokens: ws ? 4000 : 2600,
+    signal: AbortSignal.timeout(ws ? 180_000 : 120_000),
   });
 
   const parsed = extractJson(res.text);
@@ -189,7 +320,14 @@ export async function draftPlan(opts: {
 
   // A plan whose steps do not feed each other has no reason to queue: the whole
   // floor can take it at once. Only a real {{input}} makes it a chain.
-  const chained = steps.some((s) => s.prompt.includes("{{input}}") || s.prompt.includes("{{prev}}"));
+  //
+  // A build plan is different. Step one usually writes the manifest everything
+  // else installs against, so it goes out in order by default - file ownership
+  // makes `split` safe to choose, but it is not the safe default.
+  const chained = ws || steps.some((s) => s.prompt.includes("{{input}}") || s.prompt.includes("{{prev}}"));
+
+  // the planner picks the check unless you named one yourself
+  const check = ws ? (opts.verify ?? String(parsed?.verify ?? "").trim()) || null : null;
 
   // planning is real spend - it belongs in the same ledger as everything else
   store.state.ledger.tokensIn += res.tokensIn;
@@ -207,6 +345,9 @@ export async function draftPlan(opts: {
     jobId: null,
     draftedBy: res.model,
     ghost: false,
+    kind,
+    workspace: ws?.root ?? null,
+    verify: check,
   });
   return { plan, costUsd: res.costUsd };
 }
@@ -285,6 +426,8 @@ export function runPlan(plan: Plan, mode?: Plan["mode"]) {
   const job = store.addJob(plan.title, ids, kind);
   const taken = new Set<string>();
 
+  const build = plan.kind === "build" && Boolean(plan.workspace);
+
   steps.forEach((step, i) => {
     const desk = deskFor(step, taken, plan.mode === "split");
     if (desk) taken.add(desk.id);
@@ -300,6 +443,13 @@ export function runPlan(plan: Plan, mode?: Plan["mode"]) {
       stepIndex: i,
       planId: plan.id,
       retriesLeft: 1,
+      workspace: build ? plan.workspace : null,
+      // a step the planner gave no files to would be locked out of the folder
+      // entirely, which is worse than letting it work anywhere
+      claims: build ? (step.claims?.length ? step.claims : ["**"]) : [],
+      // no step carries the plan's check - see settlePlan, which runs it once
+      // the whole job has landed and puts a desk on repairing what it finds
+      verify: null,
     });
     step.taskId = task.id;
     ids.push(task.id);
