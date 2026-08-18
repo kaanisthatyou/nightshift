@@ -1,11 +1,11 @@
 {
   "name": "@kaandrick/nightshift",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "type": "module",
   "publishConfig": {
     "access": "public"
   },
-  "description": "A pixel office where cheap models work the night shift and you are the boss \u2014 delegate to any model behind an OmniRoute gateway, or point the floor at a folder and watch the desks actually build it.",
+  "description": "A pixel office where cheap models work the night shift and you are the boss — delegate to any model behind an OmniRoute gateway, or point the floor at a folder and watch the desks actually build it.",
   "keywords": [
     "llm",
     "agents",
