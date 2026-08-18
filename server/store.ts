@@ -71,6 +71,13 @@ function blankState(): FloorState {
       plannerModel: "auto",
       mcpEnabled: true,
       mcpMaxRounds: 6,
+      workspaceRoot: null,
+      // a real file takes a look, a write and a check; six rounds is a text
+      // task's budget and nowhere near enough to build anything
+      buildMaxRounds: 28,
+      shellEnabled: true,
+      shellExtra: [],
+      repairRounds: 2,
     },
   };
 }
@@ -106,6 +113,18 @@ class Store extends EventEmitter {
         for (const t of this.state.tasks) {
           if (t.stage === "running") { t.stage = "queued"; t.workerId = t.workerId ?? null; }
           if (!Array.isArray(t.toolCalls)) t.toolCalls = [];
+          // tasks written before build mode existed are text tasks, and stay so
+          if (typeof t.workspace === "undefined") t.workspace = null;
+          if (!Array.isArray(t.claims)) t.claims = [];
+          if (!Array.isArray(t.files)) t.files = [];
+          if (typeof t.verify === "undefined") t.verify = null;
+          if (!Array.isArray(t.verifyRuns)) t.verifyRuns = [];
+        }
+        for (const p of this.state.plans) {
+          if (p.kind !== "build") p.kind = "text";
+          if (typeof p.workspace === "undefined") p.workspace = null;
+          if (typeof p.verify === "undefined") p.verify = null;
+          for (const st of p.steps ?? []) if (!Array.isArray(st.claims)) st.claims = [];
         }
         // floors written before the rate-limit handling was in place were held at
         // four in flight because a burst was expensive to recover from. It is not
@@ -306,6 +325,11 @@ class Store extends EventEmitter {
       retriesLeft: 0,
       planId: opts.planId ?? null,
       toolCalls: [],
+      workspace: opts.workspace ?? null,
+      claims: opts.claims ?? [],
+      files: [],
+      verify: opts.verify ?? null,
+      verifyRuns: [],
       ...("jobId" in opts ? { jobId: opts.jobId ?? null } : {}),
       ...("stepIndex" in opts ? { stepIndex: opts.stepIndex ?? 0 } : {}),
       ...("arenaId" in opts ? { arenaId: opts.arenaId ?? null } : {}),
@@ -375,6 +399,7 @@ export const blankStep = (over: Partial<PlanStep> = {}): PlanStep => ({
   workerId: over.workerId ?? null,
   note: over.note ?? null,
   enabled: over.enabled ?? true,
+  claims: over.claims ?? [],
   taskId: over.taskId ?? null,
 });
 

@@ -86,6 +86,24 @@ export interface ToolCall {
   ms: number;
 }
 
+/** One file a desk actually put on your disk. */
+export interface FileTouch {
+  /** relative to the working folder, forward slashes */
+  path: string;
+  action: "create" | "write" | "edit";
+  bytes: number;
+  ts: number;
+}
+
+/** The check that decides whether the work is real, and what it said. */
+export interface VerifyResult {
+  command: string;
+  ok: boolean;
+  code: number | null;
+  output: string;
+  ms: number;
+}
+
 export interface Worker {
   id: string;
   name: string;
@@ -171,6 +189,26 @@ export interface Task {
   planId: string | null;
   /** every tool the desk reached for while working this, in order */
   toolCalls: ToolCall[];
+
+  // ---- build mode ----------------------------------------------------
+  /**
+   * Absolute path of the working folder. Set means this is a build task: the
+   * desk gets the native toolbox and is expected to put files on disk rather
+   * than to answer in prose. Null is the text task the floor has always run.
+   */
+  workspace: string | null;
+  /**
+   * Files this desk owns, relative to the workspace. A write outside them is
+   * refused with the reason, so eight desks can share one folder. `["**"]` is
+   * the whole project, which is what a single order gets.
+   */
+  claims: string[];
+  /** what it actually wrote, in order */
+  files: FileTouch[];
+  /** the command that has to pass before the work counts as done */
+  verify: string | null;
+  /** every time that command was run, including the failures it repaired from */
+  verifyRuns: VerifyResult[];
 }
 
 export interface Job {
@@ -195,6 +233,8 @@ export interface PlanStep {
   note: string | null;
   /** unticked steps stay on the board when the plan is sent down */
   enabled: boolean;
+  /** files this step owns, relative to the plan's working folder */
+  claims: string[];
   /** set once the step has been cut into a task */
   taskId: string | null;
 }
@@ -215,6 +255,15 @@ export interface Plan {
   /** who drafted it, or "you" when it was written by hand */
   draftedBy: string | null;
   ghost: boolean;
+  /**
+   * text: the desks answer in words, which is what the floor has always done.
+   * build: the desks get the working folder and write real files into it.
+   */
+  kind: "text" | "build";
+  /** absolute working folder, for a build plan */
+  workspace: string | null;
+  /** the command every step has to leave passing, e.g. `npm run build` */
+  verify: string | null;
 }
 
 export interface ModelInfo {
@@ -281,6 +330,9 @@ export interface FloorEvent {
     | "plan.run"
     | "tool.call"    // a desk reached for a tool
     | "tool.result"  // and got something back
+    | "file.write"   // a desk put a file on your disk
+    | "shell.run"    // a desk ran a command in the working folder
+    | "verify"       // the check that says whether the work is real
     | "mcp"          // a server came up, went down, or changed
     | "gateway"
     | "office"    // something happened on the floor that isn't work
@@ -318,6 +370,21 @@ export interface FloorState {
     mcpEnabled: boolean;
     /** how many tool rounds a desk may run before it has to answer in words */
     mcpMaxRounds: number;
+
+    // ---- build mode --------------------------------------------------
+    /** the folder new build work opens in, remembered between shifts */
+    workspaceRoot: string | null;
+    /**
+     * Rounds a build desk gets. Writing a real file takes a read, a write and
+     * a check at minimum, so six - the text-mode ceiling - is nowhere near it.
+     */
+    buildMaxRounds: number;
+    /** off means a build desk gets files but no `run` tool at all */
+    shellEnabled: boolean;
+    /** extra command heads you have allowed, on top of the built-in list */
+    shellExtra: string[];
+    /** how many times a desk may be handed its own failing check to repair */
+    repairRounds: number;
   };
 }
 
