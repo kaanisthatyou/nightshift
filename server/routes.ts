@@ -6,6 +6,8 @@ import { BOSS_LINES, pick } from "./flavor.ts";
 import { fireHappening, happeningKinds } from "./nightlife.ts";
 import { draftPlan, expandStep, runPlan } from "./planner.ts";
 import { fromClientConfig, mcp, normaliseConfig } from "./mcp.ts";
+import { ALLOWED_COMMANDS, changed, checkCommand, inside, openWorkspace, tree } from "./workspace.ts";
+import fs from "node:fs";
 import { PRESETS, TEMPERS, buildPersona, preset, roleSpec } from "../shared/presets.ts";
 import type { Plan, PlanStep, Task } from "../shared/types.ts";
 
@@ -99,6 +101,23 @@ api.post("/settings", (req, res) => {
   if (typeof b.plannerModel === "string" && b.plannerModel) s.plannerModel = b.plannerModel;
   if (typeof b.mcpEnabled === "boolean") s.mcpEnabled = b.mcpEnabled;
   if (typeof b.mcpMaxRounds === "number") s.mcpMaxRounds = Math.max(1, Math.min(20, b.mcpMaxRounds));
+  if (typeof b.buildMaxRounds === "number") s.buildMaxRounds = Math.max(6, Math.min(80, b.buildMaxRounds));
+  if (typeof b.shellEnabled === "boolean") s.shellEnabled = b.shellEnabled;
+  if (typeof b.repairRounds === "number") s.repairRounds = Math.max(0, Math.min(6, b.repairRounds));
+  if (Array.isArray(b.shellExtra)) {
+    s.shellExtra = b.shellExtra.map((x: any) => String(x).trim().toLowerCase()).filter(Boolean).slice(0, 40);
+  }
+  if (typeof b.workspaceRoot === "string") {
+    // an empty string is how you close the folder; anything else has to resolve
+    if (!b.workspaceRoot.trim()) s.workspaceRoot = null;
+    else {
+      try {
+        s.workspaceRoot = openWorkspace(b.workspaceRoot).root;
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message ?? String(err) });
+      }
+    }
+  }
   store.touch();
   res.json({ settings: s });
 });
@@ -320,6 +339,151 @@ function waitForTask(id: string, ms: number): Promise<Task | undefined> {
   });
 }
 
+// ---- the working folder ---------------------------------------------
+
+/**
+ * Open a folder for build work. Creating it if it is not there and putting it
+ * under git are both part of opening it, so this is the only honest way to ask
+ * "is this path usable" - it answers by making it so.
+ */
+api.post("/workspace", (req, res) => {
+  const raw = String(req.body?.path ?? req.body?.root ?? "").trim();
+  if (!raw) {
+    store.state.settings.workspaceRoot = null;
+    store.touch();
+    return res.json({ workspace: null });
+  }
+  try {
+    const ws = openWorkspace(raw, { create: req.body?.create !== false });
+    if (req.body?.remember !== false) {
+      store.state.settings.workspaceRoot = ws.root;
+      store.touch();
+    }
+    store.emitEvent({
+      type: "office",
+      text: `calisma klasoru: ${ws.root}`,
+      data: { workspace: ws.root, git: ws.git },
+    });
+    res.json({ workspace: ws.root, git: ws.git, entries: tree(ws.root).length });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? String(err) });
+  }
+});
+
+/** What is in the folder right now, and what has changed since the shift began. */
+api.get("/workspace/tree", (req, res) => {
+  const root = String(req.query.path ?? store.state.settings.workspaceRoot ?? "");
+  if (!root) return res.status(400).json({ error: "no working folder is open" });
+  try {
+    const ws = openWorkspace(root, { create: false });
+    res.json({ workspace: ws.root, git: ws.git, entries: tree(ws.root), changed: changed(ws.root) });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? String(err) });
+  }
+});
+
+/** One file, so the window can show what a desk actually wrote. */
+api.get("/workspace/file", (req, res) => {
+  const root = String(req.query.root ?? store.state.settings.workspaceRoot ?? "");
+  const rel = String(req.query.path ?? "");
+  if (!root) return res.status(400).json({ error: "no working folder is open" });
+  try {
+    const full = inside(openWorkspace(root, { create: false }).root, rel);
+    if (!fs.existsSync(full) || fs.statSync(full).isDirectory()) {
+      return res.status(404).json({ error: `${rel} is not a file` });
+    }
+    const body = fs.readFileSync(full, "utf8");
+    res.json({ path: rel, bytes: Buffer.byteLength(body), content: body.slice(0, 200_000) });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? String(err) });
+  }
+});
+
+/** What a desk would be allowed to run, without running anything. */
+api.get("/workspace/shell", (req, res) => {
+  const cmd = String(req.query.command ?? "");
+  res.json({
+    allowed: [...ALLOWED_COMMANDS].sort(),
+    extra: store.state.settings.shellExtra ?? [],
+    enabled: store.state.settings.shellEnabled !== false,
+    ...(cmd ? { check: checkCommand(cmd) } : {}),
+  });
+});
+
+/**
+ * One order, straight into a folder. This is the short path: no whiteboard, no
+ * plan - a single desk gets the working folder and is expected to come back
+ * with files on disk. `wait` is on by default because whoever called this
+ * usually wants to know whether it actually built.
+ */
+api.post("/build", async (req, res) => {
+  const b = req.body ?? {};
+  const text = String(b.text ?? b.prompt ?? b.idea ?? "").trim();
+  if (!text) return res.status(400).json({ error: "text required" });
+
+  let root: string;
+  try {
+    root = openWorkspace(String(b.workspace ?? b.path ?? store.state.settings.workspaceRoot ?? "")).root;
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message ?? String(err) });
+  }
+
+  // a plan is worth the extra call once the work is bigger than one desk
+  if (b.plan) {
+    try {
+      const { plan } = await draftPlan({
+        idea: text,
+        presetId: b.presetId ?? null,
+        title: b.title ?? null,
+        steps: b.stepCount,
+        model: b.model ?? null,
+        workspace: root,
+        verify: b.verify ?? null,
+      });
+      if (b.run === false) return res.json({ plan });
+      const { job } = runPlan(plan, b.mode === "split" ? "split" : "chain");
+      return res.json({ plan, job });
+    } catch (err: any) {
+      return res.status(502).json({ error: err?.message ?? String(err) });
+    }
+  }
+
+  let workerId: string | null = b.workerId ?? null;
+  if (!workerId && !store.state.workers.length) {
+    workerId = store.hire({ model: store.state.settings.defaultModel })?.id ?? null;
+  }
+  if (!workerId) {
+    const free = store.state.workers.filter((w) => w.state === "idle" && !w.currentTaskId);
+    workerId = free.sort((a, c) => a.stats.tasksDone - c.stats.tasksDone)[0]?.id ?? null;
+  }
+
+  const t = store.addTask({
+    title: b.title || text.split("\n")[0].slice(0, 60),
+    prompt: text,
+    system: b.system ?? null,
+    workerId,
+    createdBy: "boss",
+    stage: "backlog",
+    workspace: root,
+    claims: Array.isArray(b.files) && b.files.length ? b.files.map(String) : ["**"],
+    verify: b.verify ? String(b.verify) : null,
+    retriesLeft: Number.isFinite(b.retries) ? Number(b.retries) : 1,
+  });
+  dispatch(t.id, workerId, b.line || `${root}: ${text.slice(0, 120)}`);
+
+  if (b.wait === false) return res.json({ task: t });
+  // building is slower than answering - a default measured in minutes, not seconds
+  const done = await waitForTask(t.id, Number(b.waitMs) || 900_000);
+  res.json({
+    task: done,
+    files: done?.files ?? [],
+    verify: done?.verifyRuns?.at(-1) ?? null,
+    ok: done?.stage === "review" || done?.stage === "done",
+    output: done?.output ?? "",
+    worker: store.worker(done?.workerId)?.name ?? null,
+  });
+});
+
 api.get("/tasks", (req, res) => {
   const stage = req.query.stage as string | undefined;
   const list = stage ? store.state.tasks.filter((t) => t.stage === stage) : store.state.tasks;
@@ -335,6 +499,14 @@ api.get("/tasks/:id", (req, res) => {
 api.post("/tasks", async (req, res) => {
   const b = req.body ?? {};
   if (!b.prompt) return res.status(400).json({ error: "prompt required" });
+  let workspace: string | null = null;
+  if (b.workspace) {
+    try {
+      workspace = openWorkspace(String(b.workspace)).root;
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message ?? String(err) });
+    }
+  }
   const t = store.addTask({
     title: b.title || String(b.prompt).split("\n")[0].slice(0, 60),
     prompt: String(b.prompt),
@@ -342,6 +514,9 @@ api.post("/tasks", async (req, res) => {
     workerId: b.workerId ?? null,
     createdBy: b.createdBy === "boss" ? "boss" : "you",
     stage: "backlog",
+    workspace,
+    claims: workspace ? (Array.isArray(b.files) && b.files.length ? b.files.map(String) : ["**"]) : [],
+    verify: workspace && b.verify ? String(b.verify) : null,
   });
   if (b.dispatch !== false) dispatch(t.id, b.workerId ?? null, b.line);
   if (b.wait) {
@@ -486,6 +661,16 @@ api.post("/plans", async (req, res) => {
   const b = req.body ?? {};
   const idea = String(b.idea ?? b.text ?? "").trim();
 
+  // a folder on the request is what turns any of this into build work
+  let workspace: string | null = null;
+  if (b.workspace) {
+    try {
+      workspace = openWorkspace(String(b.workspace)).root;
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message ?? String(err) });
+    }
+  }
+
   // a hand-written plan skips the model entirely
   if (Array.isArray(b.steps) && b.steps.length) {
     const plan = store.addPlan({
@@ -500,6 +685,7 @@ api.post("/plans", async (req, res) => {
           roleKey: s?.roleKey ?? null,
           workerId: s?.workerId ?? null,
           note: s?.note ?? null,
+          claims: Array.isArray(s?.files) ? s.files.map(String) : Array.isArray(s?.claims) ? s.claims.map(String) : [],
         }),
       ),
       mode: b.mode === "split" ? "split" : "chain",
@@ -507,6 +693,9 @@ api.post("/plans", async (req, res) => {
       jobId: null,
       draftedBy: "you",
       ghost: false,
+      kind: workspace ? "build" : "text",
+      workspace,
+      verify: workspace && b.verify ? String(b.verify) : null,
     });
     if (b.run) {
       try {
@@ -527,6 +716,8 @@ api.post("/plans", async (req, res) => {
       title: b.title ?? null,
       steps: b.stepCount,
       model: b.model ?? null,
+      workspace,
+      verify: b.verify ?? null,
     });
     if (b.run) {
       const { job } = runPlan(plan, b.mode === "split" ? "split" : "chain");
@@ -547,6 +738,7 @@ api.patch("/plans/:id", (req, res) => {
   if (typeof b.summary === "string") plan.summary = b.summary.slice(0, 300);
   if (b.mode === "chain" || b.mode === "split") plan.mode = b.mode;
   if (typeof b.presetId === "string" || b.presetId === null) plan.presetId = b.presetId;
+  if (typeof b.verify === "string" || b.verify === null) plan.verify = b.verify ? String(b.verify).slice(0, 300) : null;
   if (Array.isArray(b.steps)) {
     // ids are kept when they are sent back, so a step keeps its link to its task
     plan.steps = b.steps.map((s: any) => {
@@ -559,6 +751,11 @@ api.patch("/plans/:id", (req, res) => {
         workerId: s?.workerId ?? null,
         note: s?.note ?? null,
         enabled: s?.enabled !== false,
+        claims: Array.isArray(s?.claims)
+          ? s.claims.map((c: any) => String(c).trim()).filter(Boolean)
+          : Array.isArray(s?.files)
+            ? s.files.map((c: any) => String(c).trim()).filter(Boolean)
+            : existing?.claims ?? [],
       };
       return next;
     });
