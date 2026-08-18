@@ -71,7 +71,18 @@ export interface Workspace {
  */
 export function inside(root: string, rel: unknown): string {
   if (typeof rel !== "string" || !rel.trim()) throw new Error("path is required");
-  const clean = rel.trim().replace(/^[\\/]+/, "");
+  const clean = rel.trim();
+  // An absolute path is refused rather than quietly re-rooted. Stripping the
+  // leading slash would be safe - it lands inside the folder either way - but
+  // it lets a desk write <root>/etc/hosts, report that it edited /etc/hosts,
+  // and be believed. A refusal costs one round and the desk corrects itself,
+  // because tool errors go back into the same conversation.
+  //
+  // Checked by shape rather than by platform: a floor on linux must not create
+  // a directory called `C:` just because that string is relative there.
+  if (/^[\\/]/.test(clean) || /^[a-zA-Z]:/.test(clean) || path.isAbsolute(clean)) {
+    throw new Error(`${rel} is an absolute path - give it relative to the working folder`);
+  }
   const full = path.resolve(root, clean);
   const back = path.relative(root, full);
   if (back.startsWith("..") || path.isAbsolute(back)) {

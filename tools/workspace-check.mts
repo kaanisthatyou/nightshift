@@ -37,15 +37,26 @@ console.log(`\nworkspace: ${root}\n`);
 // ---- the path jail ---------------------------------------------------
 console.log("paths");
 ok("a plain path resolves", inside(root, "src/app.ts") === path.join(root, "src", "app.ts"));
-ok("a leading slash is stripped, not honoured", inside(root, "/etc/passwd") === path.join(root, "etc", "passwd"));
-for (const evil of ["../escape.txt", "../../etc/passwd", "src/../../out.txt", "..\\\\windows\\\\system32"]) {
+ok("a dot path resolves", inside(root, "./src/app.ts") === path.join(root, "src", "app.ts"));
+
+// An absolute path is refused rather than quietly re-rooted, and the shapes are
+// checked on every platform: a floor on linux must not accept `C:\...` as a
+// relative name just because that is what the string technically is there.
+const escapes = [
+  "../escape.txt",
+  "../../etc/passwd",
+  "src/../../out.txt",
+  "/etc/passwd",
+  "/src/app.ts",
+  "C:\\Windows\\System32\\drivers\\etc\\hosts",
+  "\\\\server\\share\\thing.txt",
+  path.join(os.homedir(), "taken.txt"),
+];
+for (const evil of escapes) {
   let threw = false;
   try { inside(root, evil); } catch { threw = true; }
   ok(`refuses ${evil}`, threw);
 }
-let absBlocked = false;
-try { inside(root, path.join(os.homedir(), "taken.txt")); } catch { absBlocked = true; }
-ok("refuses an absolute path elsewhere", absBlocked);
 let gitBlocked = false;
 try { inside(root, ".git/config"); } catch { gitBlocked = true; }
 ok("refuses the git directory", gitBlocked);
