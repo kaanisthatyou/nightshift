@@ -1,6 +1,6 @@
 ---
 name: nightshift
-description: "Use when work should be pushed down to cheap or free models instead of being done here — batches of small mechanical subtasks (renaming, rewriting, translating, summarising, generating variants, extracting fields, drafting boilerplate), or when the user says nightshift / delege et / ucuz modele ver / floor'a at. Also use to check what the floor is doing, review finished work, or run a multi-step pipeline across desks. NIGHTSHIFT is a local pixel office at http://localhost:20200 backed by an OmniRoute gateway."
+description: "Use when work should be pushed down to cheap or free models instead of being done here — batches of small mechanical subtasks (renaming, rewriting, translating, summarising, generating variants, extracting fields, drafting boilerplate), or when the user says nightshift / delege et / ucuz modele ver / floor'a at. Also use to BUILD: when the user names a working folder and wants a project, script or change actually written into it, the floor's desks get real file and shell tools and a check that has to pass. Also use to see what the floor is doing, review finished work, or run a multi-step pipeline across desks. NIGHTSHIFT is a local pixel office at http://localhost:20200 backed by an OmniRoute gateway."
 ---
 
 # NIGHTSHIFT — you are the boss
@@ -9,7 +9,8 @@ There is a floor of workers at `http://localhost:20200`. Each desk is an agent b
 model served through OmniRoute (`http://localhost:20128/v1`). You dispatch orders over HTTP;
 the user watches your avatar walk to the desk and say the prompt.
 
-You do the thinking. The floor does the volume.
+You do the thinking. The floor does the volume — and, when you give it a folder, the typing:
+a desk in build mode writes real files and has to leave a real check passing.
 
 ## Before anything
 
@@ -219,6 +220,66 @@ given usually answered from imagination.
 
 Do not hand a toolbox to every desk by default. A cheap model with twenty-six schemas in
 front of it picks badly; give one desk the one server it needs for that job.
+
+## Building — when the work is files, not an answer
+
+Everything above gets you text back. When the user wants something **built** — a project, a
+script, a change to a real folder — use build mode instead, or the floor will hand you a
+beautiful description of code that exists nowhere.
+
+Open the folder first. The user has to have said which one; never guess a path, and never
+default to the repo you are standing in.
+
+```bash
+curl -s localhost:20200/api/workspace -H 'content-type: application/json' \
+  -d '{"path":"<the folder the user named>"}'
+```
+
+Then one desk, one job:
+
+```bash
+curl -s localhost:20200/api/build -H 'content-type: application/json' \
+  -d '{"text":"<the whole instruction>", "verify":"npm test", "waitMs":900000}'
+```
+
+The response tells you what actually happened: `files[]` is what landed on disk, `verify` is
+the check and whether it passed, `ok` is whether the task survived. **Read those, not the
+summary.** A desk's own account of its work is the least reliable thing in the response —
+`files: []` with a confident paragraph means it wrote nothing.
+
+Always pass `verify` when there is any command that can prove the work: `npm test`,
+`node index.js`, `pytest -q`, `tsc --noEmit`. Without it a desk decides for itself when it is
+finished, which is the failure mode the whole mode exists to remove. With it, a failure goes
+back to the same desk as work to repair, up to `settings.repairRounds` times.
+
+For anything bigger than one desk, plan it against the folder:
+
+```bash
+curl -s localhost:20200/api/plans -H 'content-type: application/json' \
+  -d '{"idea":"<the whole thing>", "workspace":"<folder>", "stepCount":4, "verify":"npm test", "run":true}'
+```
+
+Each step owns a set of files and is refused the rest, so the steps cannot overwrite one
+another. Two things are worth checking on the draft before it runs, and both are cheap:
+
+- **every step has files.** A step with `claims: []` takes the whole folder and can undo another's work.
+- **no two steps claim the same path.** The second desk to reach for it is blocked, not merged.
+
+Fix either by `PATCH /api/plans/<id>` with corrected `steps[].files` before running it.
+
+Build plans default to `chain` — step one usually writes the manifest the rest install
+against. `split` is safe to choose once you have read the claims, and is much faster.
+
+When the job lands the check runs once, and a failing check puts a desk that owns the whole
+folder onto repairing it. So a plan that ends `failed` is not necessarily finished failing —
+look for a `fix:` task before you report anything.
+
+### What you cannot delegate here
+
+The floor refuses these rather than asking, so do not design around them: anything outside the
+folder, `.git`, deletes, and any command that is not build tooling (no `curl`, `rm`, `sudo`,
+pipes, redirects or subshells). If a job genuinely needs one of those, do it yourself — you
+have the tools, and the desk does not.
 
 ## Picking a model honestly
 

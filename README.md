@@ -25,6 +25,12 @@ pipelines, an A/B arena, crew loadouts with real personas, and a whiteboard that
 idea into work — with a window you can leave open on a second monitor and actually enjoy
 looking at.
 
+Point the floor at a folder and the desks stop describing work and start doing it. In
+**build mode** a desk gets real tools — read, write, edit, run — inside that folder only,
+each step owns the files it is allowed to touch, and a check has to pass before anything
+counts as finished. What lands in your review tray is code that ran, not code that reads
+like it would.
+
 Claude Code drives the same floor over HTTP, so the heavy thinking happens in Claude while
 the small, boring, repetitive work gets pushed down to free models.
 
@@ -174,6 +180,12 @@ And with no gateway reachable at all, the floor still runs — but every output 
 `GHOST OUTPUT` and tagged `ghost` in the API. Nothing is sent anywhere and nothing is made
 up. Turn it off in gateway → house rules.
 
+**A desk never reaches past its folder.** Build mode is the only thing here that touches your
+disk, and it does so through a jail rather than through a prompt asking nicely: paths that
+resolve outside the working folder are refused, `run` takes an allowlist of build tooling and
+nothing else, there is no delete tool, and the folder is put under git before the first write.
+See [build mode](#build-mode--desks-that-write-files-not-descriptions-of-files).
+
 ## Loadouts — a crew, not eight copies of one model
 
 A desk is not just a model with a name on it. Under **crew** you pick a **loadout** and the
@@ -221,6 +233,61 @@ typed straight onto the board.
 Planning runs on its own model (**mains ▸ planner**) — worth a smarter one than the desks,
 since every step inherits its judgement. That call lands on the same payroll as everything
 else; nothing is spent quietly.
+
+## Build mode — desks that write files, not descriptions of files
+
+Everything above has the desks answering in words. Point one at a folder instead and it gets
+six real tools — `list_files`, `read_file`, `write_file`, `edit_file`, `run`, `finish` — and is
+expected to come back with something on your disk.
+
+```bash
+curl -s localhost:20200/api/workspace -H 'content-type: application/json' \
+  -d '{"path":"~/code/the-thing"}'          # created if missing, put under git first
+
+curl -s localhost:20200/api/build -H 'content-type: application/json' \
+  -d '{"text":"a node cli that counts word frequencies, with a test",
+       "verify":"npm test"}'
+```
+
+The `verify` command is the point. A desk that says it is finished has that command run
+against its work, and a failure goes straight back into the same conversation as something to
+repair — it does not get to call the job done while the check is red. Nothing that only
+*claims* to work reaches your review tray.
+
+For work bigger than one desk, put a folder on the whiteboard:
+
+```bash
+curl -s localhost:20200/api/plans -H 'content-type: application/json' \
+  -d '{"idea":"<the whole thing>", "workspace":"~/code/the-thing", "stepCount":4, "run":true}'
+```
+
+The planner reads the folder first, then cuts the idea into steps that each **own a set of
+files**. That ownership is enforced by the floor, not requested politely: a desk writing a path
+another step claimed is refused and told whose it is. Eight desks can then share one folder
+without overwriting each other, and because they cannot see each other's work while they write,
+the planner is made to pin every shared contract — module paths, exported names, signatures —
+into the plan itself.
+
+When the whole job lands, the check runs once, and if it fails a desk that owns the **whole**
+folder is put on repairing it. That desk is the only one who can fix a fault that lives between
+two files rather than inside one, which is where a parallel build usually breaks.
+
+### What a desk cannot do
+
+Build mode hands a cheap model write access to a folder, so the limits are enforced in the
+server rather than asked for in the prompt:
+
+- **Nothing outside the folder.** Every path resolves through the jail; `..`, absolute paths and
+  symlinks that point out are refused. `.git` is off limits, and so is opening your home
+  directory or a drive root as a workspace.
+- **Build tooling only.** `run` takes an allowlist — npm, pnpm, node, python, pytest, tsc, git
+  and friends — checked per `&&` segment, so nothing hides behind a first word. Pipes,
+  redirects, subshells, backgrounding and `curl`/`rm`/`sudo` are refused outright. `cwd` never
+  leaves the folder.
+- **No delete tool at all**, and the folder is git-initialised before the first write, so a bad
+  shift is `git diff` away from being understood and `git checkout` away from being gone.
+
+`npm run check:jail` exercises all of that without a model in the loop.
 
 ## The router — eight desks under one rate limit
 
@@ -320,7 +387,7 @@ Then just say *"nightshift these"* and hand over a batch.
 | GET | `/api/state` | full snapshot: workers, tasks, jobs, ledger, gateway |
 | GET | `/api/models?refresh=1` | model board with free/price flags |
 | POST | `/api/gateway` | `{baseUrl, apiKey}` — reconnect |
-| POST | `/api/settings` | `{autoAssign?, ghostMode?, maxParallel?, defaultModel?, plannerModel?, mcpEnabled?, mcpMaxRounds?}` |
+| POST | `/api/settings` | `{autoAssign?, ghostMode?, maxParallel?, defaultModel?, plannerModel?, mcpEnabled?, mcpMaxRounds?, workspaceRoot?, buildMaxRounds?, shellEnabled?, repairRounds?, shellExtra?}` |
 | GET | `/api/combos` | the gateway's routing combos and which one is live |
 | POST | `/api/combos/use` | `{name}` — switch the live combo |
 | GET | `/api/presets` | the loadout catalog: crews, roles, tempers |
@@ -329,14 +396,19 @@ Then just say *"nightshift these"* and hand over a batch.
 | PATCH | `/api/workers/:id` | `{model?, roleKey?, temper?, persona?, name?, state?, mcpIds?, mcpTools?}` — change the desk, the head, or its tools |
 | DELETE | `/api/workers/:id` | fire |
 | POST | `/api/orders` | `{text, workerId?, model?, wait?, waitMs?}` — the boss walks over |
+| POST | `/api/build` | `{text, workspace?, verify?, files?, plan?, mode?, wait?}` — an order that writes files instead of prose |
+| POST | `/api/workspace` | `{path}` — open a working folder (created if missing, put under git). `{path:""}` closes it |
+| GET | `/api/workspace/tree` | what is in the folder, and what git says has changed |
+| GET | `/api/workspace/file` | `?path=` — one file, to read what a desk actually wrote |
+| GET | `/api/workspace/shell` | the command allowlist, and `?command=` to test one without running it |
 | POST | `/api/tasks` | same but without the theatre defaults |
 | GET | `/api/tasks/:id` | one task with output, tokens, cost, latency, routing decision |
 | POST | `/api/tasks/:id/approve` | morale up, task closed |
 | POST | `/api/tasks/:id/reject` | `{note}` — sends it back with your note attached |
 | POST | `/api/tasks/:id/retry` | run it again |
-| POST | `/api/plans` | `{idea, presetId?, stepCount?}` — span an idea out (or pass `steps` to write it yourself) |
+| POST | `/api/plans` | `{idea, presetId?, stepCount?, workspace?, verify?}` — span an idea out (or pass `steps` to write it yourself). A `workspace` makes it a build plan |
 | GET | `/api/plans/:id` | the plan and the tasks it was cut into |
-| PATCH | `/api/plans/:id` | `{title?, mode?, steps?}` — edit the board |
+| PATCH | `/api/plans/:id` | `{title?, mode?, verify?, steps?}` — edit the board |
 | POST | `/api/plans/:id/expand` | `{stepId, count?}` — split one step into several |
 | POST | `/api/plans/:id/run` | `{mode}` — `chain` or `split`, onto the floor |
 | GET | `/api/mcp` | the toolbox: every server, its state and its tools |
