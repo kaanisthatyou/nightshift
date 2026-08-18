@@ -5,7 +5,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "A pixel office where cheap models work the night shift and you are the boss — a visual floor for delegating small tasks to any model behind an OmniRoute gateway.",
+  "description": "A pixel office where cheap models work the night shift and you are the boss \u2014 delegate to any model behind an OmniRoute gateway, or point the floor at a folder and watch the desks actually build it.",
   "keywords": [
     "llm",
     "agents",
@@ -15,7 +15,9 @@
     "orchestration",
     "claude-code",
     "pixel-art",
-    "developer-tools"
+    "developer-tools",
+    "coding-agent",
+    "autonomous-agents"
   ],
   "license": "MIT",
   "author": "Kaan (https://github.com/kaanisthatyou)",
@@ -53,6 +55,9 @@
     "dev:web": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "check:jail": "tsx tools/workspace-check.mts",
+    "check:json": "tsx tools/json-check.mts",
+    "check": "npm run typecheck && npm run check:jail && npm run check:json",
     "art": "tsx tools/pixel-preview.mts .art/",
     "shots": "tsx tools/scene-shot.mts docs/",
     "keys": "node tools/import-keys.mjs",

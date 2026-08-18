@@ -19,6 +19,14 @@ jobs:
       - name: types
         run: npm run typecheck
 
+      # build mode hands a cheap model write access to a folder on your disk.
+      # the parts that say no are worth testing without a model in the loop.
+      - name: the jail holds
+        run: npm run check:jail
+
+      - name: the planner reads what models actually send
+        run: npm run check:json
+
       - name: build the window
         run: npm run build
 
