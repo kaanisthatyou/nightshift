@@ -19,6 +19,7 @@ const blank = (over: Partial<PlanStep> = {}): PlanStep => ({
   workerId: null,
   note: null,
   enabled: true,
+  claims: [],
   taskId: null,
   ...over,
 });
@@ -92,6 +93,10 @@ function StepCard({ index, step, plan, onPatch, onMove, onDrop, onExpand, busy }
   const openTask = useFloor((s) => s.openTaskPanel);
   const task = state?.tasks.find((t) => t.id === step.taskId);
   const live = plan.status !== "draft";
+  // the floor refuses the second desk to reach for a shared path, so an overlap
+  // on the board is a step that will stall rather than a step that will race
+  const clash = step.claims.filter((c) =>
+    plan.steps.some((o) => o.id !== step.id && o.enabled && o.claims.includes(c)));
 
   return (
     <div className={`wb-step ${step.enabled ? "" : "off"} ${task ? `st-${task.stage}` : ""}`}>
@@ -118,9 +123,29 @@ function StepCard({ index, step, plan, onPatch, onMove, onDrop, onExpand, busy }
       <textarea
         className="wb-step-body"
         value={step.prompt}
-        placeholder="the whole instruction, standing on its own. {{input}} pulls in the previous step's output."
+        placeholder={
+          plan.kind === "build"
+            ? "exactly which files to write and what goes in each. the desk sees the folder, not the other desks."
+            : "the whole instruction, standing on its own. {{input}} pulls in the previous step's output."
+        }
         onChange={(e) => onPatch({ prompt: e.target.value })}
       />
+
+      {plan.kind === "build" && (
+        <div className="row" style={{ marginTop: 4 }}>
+          <span className="k" title="the only paths this desk may write - anything else is refused">owns</span>
+          <input
+            className="grow"
+            value={step.claims.join(", ")}
+            spellCheck={false}
+            disabled={live}
+            placeholder="src/server.ts, src/routes/*.ts   ·   empty means the whole folder"
+            onChange={(e) =>
+              onPatch({ claims: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })
+            }
+          />
+        </div>
+      )}
 
       <div className="wb-step-foot">
         <label className="tick" title="untick to leave this one on the board">
@@ -128,7 +153,19 @@ function StepCard({ index, step, plan, onPatch, onMove, onDrop, onExpand, busy }
           <i />
           <span>in</span>
         </label>
-        {step.prompt.includes("{{input}}") && <span className="chip">↩ takes previous output</span>}
+        {plan.kind !== "build" && step.prompt.includes("{{input}}") && (
+          <span className="chip">↩ takes previous output</span>
+        )}
+        {plan.kind === "build" && !step.claims.length && (
+          <span className="chip bad" title="with no files of its own this desk can write anywhere, and may undo another's work">
+            owns nothing · will take the whole folder
+          </span>
+        )}
+        {plan.kind === "build" && clash.length > 0 && (
+          <span className="chip bad" title="another step claims the same path - one of them will be blocked">
+            clashes on {clash.join(", ")}
+          </span>
+        )}
         {step.note && <span className="hint ell grow">{step.note}</span>}
         <span className="grow" />
         {task ? (
@@ -153,6 +190,9 @@ function Composer({ onDrafted }: { onDrafted: (id: string) => void }) {
   const [idea, setIdea] = useState(seedIdea);
   const [presetId, setPresetId] = useState("");
   const [count, setCount] = useState(5);
+  // a folder already open on the floor is the obvious thing to build into
+  const [folder, setFolder] = useState(state?.settings.workspaceRoot ?? "");
+  const [build, setBuild] = useState(Boolean(state?.settings.workspaceRoot));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -168,7 +208,13 @@ function Composer({ onDrafted }: { onDrafted: (id: string) => void }) {
     setBusy(true);
     setErr(null);
     try {
-      const r = await post<{ plan: Plan }>("/plans", { idea, presetId: presetId || null, stepCount: count });
+      const r = await post<{ plan: Plan }>("/plans", {
+        idea,
+        presetId: presetId || null,
+        stepCount: count,
+        // a folder is what turns a plan into work that lands on disk
+        workspace: build ? folder.trim() : null,
+      });
       onDrafted(r.plan.id);
     } catch (e: any) {
       setErr(e.message);
@@ -186,6 +232,7 @@ function Composer({ onDrafted }: { onDrafted: (id: string) => void }) {
         title: idea.split("\n")[0].slice(0, 60) || "untitled plan",
         presetId: presetId || null,
         steps: [{ title: "step 1", prompt: idea }],
+        workspace: build ? folder.trim() : null,
       });
       onDrafted(r.plan.id);
     } catch (e: any) {
@@ -216,6 +263,30 @@ function Composer({ onDrafted }: { onDrafted: (id: string) => void }) {
           }}
         />
         <div className="row wrap" style={{ marginTop: 8 }}>
+          <span className="k">kind</span>
+          <span className="seg">
+            <button className={!build ? "on" : ""} onClick={() => setBuild(false)}>text</button>
+            <button className={build ? "on" : ""} onClick={() => setBuild(true)}>build</button>
+          </span>
+          {build ? (
+            <input
+              className="grow"
+              value={folder}
+              spellCheck={false}
+              placeholder="which folder? it is created if it is not there"
+              onChange={(e) => setFolder(e.target.value)}
+            />
+          ) : (
+            <span className="sub grow">the desks answer in words - nothing touches your disk</span>
+          )}
+        </div>
+        {build && (
+          <div className="hint" style={{ marginTop: 4 }}>
+            the planner reads the folder first, then cuts the idea into steps that each own their own files. the
+            check runs once the whole job lands, and a desk gets put on whatever it finds.
+          </div>
+        )}
+        <div className="row wrap" style={{ marginTop: 8 }}>
           <span className="k">floor</span>
           <span className="strip" style={{ minWidth: 170 }}>
             <select value={presetId} onChange={(e) => setPresetId(e.target.value)}>
@@ -243,8 +314,12 @@ function Composer({ onDrafted }: { onDrafted: (id: string) => void }) {
           <button className="btn" disabled={busy || !idea.trim()} onClick={() => void byHand()}>
             start empty
           </button>
-          <button className="btn primary" disabled={busy || !idea.trim()} onClick={() => void draft()}>
-            {busy ? "at the board..." : "span it out"}
+          <button
+            className="btn primary"
+            disabled={busy || !idea.trim() || (build && !folder.trim())}
+            onClick={() => void draft()}
+          >
+            {busy ? "at the board..." : build ? "plan the build" : "span it out"}
           </button>
         </div>
         {err && <div className="warn" style={{ marginTop: 8 }}>{err}</div>}
@@ -282,6 +357,7 @@ function Board({ plan }: { plan: Plan }) {
         title: local.title,
         summary: local.summary,
         mode: local.mode,
+        verify: local.verify,
         steps: local.steps,
       }).catch(() => {});
     }, 700);
@@ -365,6 +441,16 @@ function Board({ plan }: { plan: Plan }) {
         <span className={`chip ${live ? (local.status === "done" ? "ok" : local.status === "failed" ? "bad" : "") : ""}`}>
           {local.status}
         </span>
+        {local.kind === "build" && local.workspace && (
+          <span className="chip ok ell" style={{ maxWidth: 260 }} title={local.workspace}>
+            building in {local.workspace}
+          </span>
+        )}
+        {local.kind === "build" && (
+          local.verify
+            ? <span className="chip">check: {local.verify}</span>
+            : <span className="chip bad">no check · nothing will prove this runs</span>
+        )}
         {local.ghost && <span className="chip ghost">ghost draft</span>}
         {local.draftedBy && <span className="chip ell" style={{ maxWidth: 190 }}>drafted by {local.draftedBy}</span>}
         <span className="grow" />
@@ -409,6 +495,18 @@ function Board({ plan }: { plan: Plan }) {
       {!live && missing.length > 0 && (
         <div className="wb-note">
           no desk holds {missing.join(", ")} — those steps go to whoever is free. hire the role in <b>crew</b> to route them properly.
+        </div>
+      )}
+      {local.kind === "build" && !live && (
+        <div className="wb-bar" style={{ marginTop: 6 }}>
+          <span className="k">check</span>
+          <input
+            className="grow"
+            value={local.verify ?? ""}
+            spellCheck={false}
+            placeholder="npm run build · pytest -q · node test.js  ·  run once the whole job lands"
+            onChange={(e) => edit((c) => ({ ...c, verify: e.target.value || null }))}
+          />
         </div>
       )}
       {local.mode === "chain" && !live && (

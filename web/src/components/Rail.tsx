@@ -1,4 +1,5 @@
 import { useState } from "react";
+import Build from "./Build.tsx";
 import { post, useFloor, type Tab } from "../store.ts";
 import Arena from "./Arena.tsx";
 import Crew from "./Crew.tsx";
@@ -296,9 +297,9 @@ function Wire() {
   const cls = (type: string) =>
     type.startsWith("boss") ? "boss"
     : type === "office" ? "office"
-    : type === "worker.done" ? "ok"
+    : type === "worker.done" || type === "file.write" ? "ok"
     : type === "worker.fail" ? "bad"
-    : type.startsWith("worker") ? "work"
+    : type.startsWith("worker") || type === "shell.run" || type === "verify" ? "work"
     : "sys";
 
   const lines = log.filter((e) => e.type !== "worker.chunk").slice(-160);
@@ -314,8 +315,9 @@ function Wire() {
             const time = new Date(e.ts).toLocaleTimeString("en-GB", { hour12: false });
             const who =
               e.type.startsWith("boss") ? "BOSS" : w ? w.name.split(" ")[0].toUpperCase() : e.type.split(".")[0].toUpperCase();
+            const failedCheck = e.type === "verify" && e.data?.ok === false;
             return (
-              <div key={e.id} className={`ln ${cls(e.type)} ${i % 2 ? "alt" : ""}`}>
+              <div key={e.id} className={`ln ${failedCheck ? "bad" : cls(e.type)} ${i % 2 ? "alt" : ""}`}>
                 <span className="t">{time}</span>
                 <span className="who">{who}</span>
                 <span className="msg">{(e.text ?? "").slice(0, 220)}</span>
@@ -547,6 +549,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "crew", label: "crew" },
   { id: "plan", label: "plan" },
   { id: "board", label: "board" },
+  { id: "build", label: "build" },
   { id: "arena", label: "arena" },
   { id: "wire", label: "wire" },
   { id: "mains", label: "mains" },
@@ -575,6 +578,7 @@ export default function Rail() {
         {tab === "crew" && <Crew />}
         {tab === "plan" && <Plans />}
         {tab === "board" && <Board />}
+        {tab === "build" && <Build />}
         {tab === "arena" && <Arena />}
         {tab === "wire" && <Wire />}
         {tab === "mains" && <GatewayPanel />}

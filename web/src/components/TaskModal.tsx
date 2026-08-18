@@ -29,7 +29,48 @@ export default function TaskModal() {
           {t.latencyMs > 0 && <span className="chip">{(t.latencyMs / 1000).toFixed(1)}s</span>}
           <span className="chip paid">${t.costUsd.toFixed(6)}</span>
           <span className="chip">try #{t.attempts}</span>
+          {t.workspace && (
+            <span className="chip ell" style={{ maxWidth: 220 }} title={t.workspace}>
+              in {t.workspace.split(/[\\/]/).pop()}
+            </span>
+          )}
         </div>
+
+        {t.workspace && (
+          <>
+            <div className="sub" style={{ marginBottom: 4 }}>
+              what landed on disk {t.files.length ? "" : "· nothing yet"}
+            </div>
+            <div className="row wrap" style={{ marginBottom: 10 }}>
+              {t.claims.length > 0 && t.claims[0] !== "**" && (
+                <span className="chip" title="the only files this desk was allowed to touch">
+                  owns {t.claims.join(", ")}
+                </span>
+              )}
+              {t.files.map((f) => (
+                <span key={f.path} className="chip ok" title={`${f.action} · ${f.bytes} bytes`}>
+                  {f.action === "edit" ? "~" : "+"} {f.path}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
+
+        {t.verifyRuns.length > 0 && (
+          <>
+            <div className="sub" style={{ marginBottom: 4 }}>
+              the check · ran {t.verifyRuns.length}×
+            </div>
+            <div className="row wrap" style={{ marginBottom: 4 }}>
+              <span className={`chip ${t.verifyRuns.at(-1)!.ok ? "ok" : "bad"}`}>
+                $ {t.verifyRuns.at(-1)!.command} → {t.verifyRuns.at(-1)!.ok ? "passed" : "failed"}
+              </span>
+            </div>
+            <div className="mono-out" style={{ maxHeight: 160, marginBottom: 10 }}>
+              {t.verifyRuns.at(-1)!.output}
+            </div>
+          </>
+        )}
 
         <div className="sub" style={{ marginBottom: 4 }}>the order</div>
         <div className="mono-out" style={{ maxHeight: 120, marginBottom: 10 }}>{t.sentPrompt || t.prompt}</div>

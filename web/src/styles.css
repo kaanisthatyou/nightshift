@@ -1092,3 +1092,29 @@ a { color: var(--cyan); }
   .step-who { width: 100%; }
   .wb-step-head { flex-wrap: wrap; }
 }
+
+/* ---- the working folder ------------------------------------------- */
+
+.ws-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 10px;
+  padding: 2px 4px;
+  border-bottom: 1px solid #131725;
+  cursor: pointer;
+}
+.ws-row:last-child { border-bottom: 0; }
+.ws-row:hover { background: #131725; }
+.ws-row.dir { color: var(--dim); cursor: default; }
+.ws-row.dir:hover { background: transparent; }
+.ws-row .sub { flex: none; }
+
+.ws-mark {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  color: var(--dim);
+}
+.ws-mark.new { color: var(--green); }
+.ws-mark.edit { color: var(--amber); }

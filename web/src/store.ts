@@ -3,7 +3,7 @@ import { create } from "zustand";
 import type { FloorEvent, FloorState, ModelInfo, ServerMessage } from "../../shared/types.ts";
 import type { CrewPreset, Temper } from "../../shared/presets.ts";
 
-export type Tab = "crew" | "plan" | "board" | "arena" | "wire" | "mains";
+export type Tab = "crew" | "plan" | "board" | "build" | "arena" | "wire" | "mains";
 
 interface UI {
   state: FloorState | null;

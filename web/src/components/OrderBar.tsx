@@ -17,6 +17,10 @@ export default function OrderBar() {
   const setTab = useFloor((s) => s.setTab);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  // build is only offered once a folder is open - the switch is the folder
+  const root = state?.settings.workspaceRoot ?? null;
+  const [build, setBuild] = useState(false);
+  const building = build && Boolean(root);
   const [ph] = useState(() => PLACEHOLDERS[Math.floor(Math.random() * PLACEHOLDERS.length)]);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -38,7 +42,13 @@ export default function OrderBar() {
     if (!t || sending) return;
     setSending(true);
     try {
-      await post("/orders", { text: t, workerId: selected || undefined, wait: false });
+      if (building) {
+        // a build takes minutes, not seconds - the floor reports back through
+        // the window rather than through this request
+        await post("/build", { text: t, workspace: root, workerId: selected || undefined, wait: false });
+      } else {
+        await post("/orders", { text: t, workerId: selected || undefined, wait: false });
+      }
       setText("");
     } catch (err: any) {
       alert(`the order bounced: ${err.message}`);
@@ -49,6 +59,18 @@ export default function OrderBar() {
 
   return (
     <div className="orderbar">
+      <span className="seg" title={root ? `build into ${root}` : "open a folder under build to turn this on"}>
+        <button className={!building ? "on" : ""} onClick={() => setBuild(false)}>text</button>
+        <button
+          className={building ? "on" : ""}
+          onClick={() => {
+            if (root) setBuild(true);
+            else setTab("build");
+          }}
+        >
+          build
+        </button>
+      </span>
       <select value={selected ?? ""} onChange={(e) => select(e.target.value || null)}>
         <option value="">▸ whoever is free</option>
         {workers.map((w) => (
@@ -60,7 +82,13 @@ export default function OrderBar() {
       <input
         ref={inputRef}
         value={text}
-        placeholder={workers.length ? ph : "hire someone first (roster ▸ hire)"}
+        placeholder={
+          !workers.length
+            ? "hire someone first (roster ▸ hire)"
+            : building
+              ? `build it in ${root?.split(/[\\/]/).pop()} - files, not a description of files`
+              : ph
+        }
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") void send();
@@ -77,7 +105,7 @@ export default function OrderBar() {
         plan it
       </button>
       <button className="btn primary" onClick={() => void send()} disabled={sending || !text.trim()}>
-        {sending ? "walking..." : "give order"}
+        {sending ? "walking..." : building ? "build it" : "give order"}
       </button>
     </div>
   );
