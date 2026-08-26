@@ -43,9 +43,67 @@ export function extractJson(raw: string): any {
     try {
       return JSON.parse(repaired);
     } catch {
+      // Nothing is wrong with the shape - the model simply stopped mid-word,
+      // because a plan is the longest thing a cheap model ever writes here.
+      // Six finished steps are worth far more than the exception that throws
+      // all six away along with the ten minutes it took to write them.
+      const rescued = closeTruncated(repaired);
+      if (rescued) return rescued;
       throw first; // say what was actually wrong with what it sent
     }
   }
+}
+
+/**
+ * Rewind a cut-off answer to the last point where it was structurally whole,
+ * and close it there.
+ *
+ * The floor runs on free models measured at about eight tokens a second, and a
+ * build plan is thousands of them in one un-streamed reply, so being cut off is
+ * a routine outcome rather than a freak one. Every position where a value had
+ * just finished is a candidate ending; we walk them from the back and keep the
+ * first that parses, which is the longest salvageable prefix. Returns null when
+ * there is genuinely nothing whole in there.
+ */
+function closeTruncated(slice: string): any | null {
+  const open: string[] = [];
+  const marks: { pos: number; close: string }[] = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < slice.length; i++) {
+    const ch = slice[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      if (inString) escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") open.push("}");
+    else if (ch === "[") open.push("]");
+    else if (ch === "}" || ch === "]") {
+      open.pop();
+      // a value just closed here, so everything still open could be closed too
+      marks.push({ pos: i + 1, close: [...open].reverse().join("") });
+    }
+  }
+
+  for (let i = marks.length - 1; i >= 0; i--) {
+    const { pos, close } = marks[i];
+    try {
+      return JSON.parse(slice.slice(0, pos) + close);
+    } catch {
+      /* that cut was still mid-structure - keep rewinding */
+    }
+  }
+  return null;
 }
 
 function rosterFor(presetId: string | null): string {
@@ -145,8 +203,19 @@ function buildDraftPrompt(idea: string, root: string, presetId: string | null, c
     "Each step is done by one small, cheap model that has exactly six tools:",
     "list_files, read_file, write_file, edit_file, run (build tooling only), finish.",
     "",
+    "This is a whole floor, not one model. Plan for what the idea actually deserves - the finished thing a",
+    "competent team would hand over - and then divide that. Do not shrink the product to fit the desks.",
+    "",
     "Rules:",
-    `- ${count} steps at most. Fewer is better - a step that writes three related files beats three steps.`,
+    `- Use as many steps as the work genuinely needs, up to ${count}. Do not pad a small idea to reach that`,
+    "  number, and do not compress a real product into four steps - a step that quietly carries three unrelated",
+    "  concerns is one desk doing the whole job badly.",
+    "- Scope it like a product, not a demo. Pick the stack the idea actually calls for and say so: a real",
+    "  framework, real dependencies, a real dependency manifest. A build tool the desks install is fine - they",
+    "  can run npm, pip, cargo and the rest. Do not fall back to a single static file to keep things simple.",
+    "- Every step must leave a complete, non-trivial slice behind: real logic, real state, real error handling,",
+    "  the styling the thing needs to look finished. No placeholder copy, no 'TODO: implement', no stub that",
+    "  returns an empty array, no file that only re-exports another.",
     "- Every step must list, in `files`, the exact paths it owns. Two steps must never claim the same path;",
     "  the floor refuses a write outside a step's own list, so an overlap becomes a blocked desk.",
     "- Between them the steps must cover a project that actually runs: entry point, config, dependency",
@@ -156,9 +225,13 @@ function buildDraftPrompt(idea: string, root: string, presetId: string | null, c
     "  relevant half of that contract inside the prompt of every step that touches it.",
     "- Each step's prompt stands on its own: which files to create, what goes in each, and what it may assume",
     "  already exists. Write it as an instruction to a competent junior, not as a summary.",
-    "- If the folder has no project skeleton yet, the first step creates it - manifest, config, folder layout.",
-    "- Prefer the runtime's own tooling and zero extra dependencies. A plain `node test.js` that a desk can actually",
-    "  make pass beats a jest-and-typescript setup that four small models have to configure between them.",
+    "- Write those prompts tight. Dense instruction, no preamble, no restating the idea back, no encouragement -",
+    "  every wasted sentence is a wasted second, and this plan is being written by a slow model. Ambition belongs",
+    "  in what you ask for, never in how many words you use to ask.",
+    "- Give every step a `done` line: the one observable thing that is true when that step is genuinely",
+    "  finished. Write it as something a reader could check, not as a restatement of the title.",
+    "- If the folder has no project skeleton yet, the first step creates it - manifest, config, folder layout,",
+    "  and the shared types or interfaces the later steps import.",
     "- `verify` is one command that proves the whole thing works when run in that folder, e.g. `npm run build`,",
     "  `npm test`, `node index.js --check`, `pytest -q`, `tsc --noEmit`. It must be real: a command the plan's own",
     "  files make runnable. If nothing sensible can be checked, use an empty string.",
@@ -176,6 +249,7 @@ function buildDraftPrompt(idea: string, root: string, presetId: string | null, c
     '"verify":"the one command that proves it works",' +
     '"steps":[{"title":"short step name","prompt":"the full self-contained instruction",' +
     '"roleKey":"key from the roster","files":["exact/path.ts","another/path.ts"],' +
+    '"done":"the observable thing that is true when this step is finished",' +
     '"note":"why this step exists, one short line"}]}',
   ].join("\n");
 }
@@ -202,13 +276,24 @@ function expandPrompt(step: PlanStep, plan: Plan, count: number): string {
     .join("\n");
 }
 
-function coerceSteps(raw: any, presetId: string | null): PlanStep[] {
+/**
+ * The planner's JSON turned into steps the floor can run. Exported for the same
+ * reason `extractJson` is: this is where a cheap model's near-miss either gets
+ * repaired or quietly loses a step, and that is worth a check.
+ */
+export function coerceSteps(raw: any, presetId: string | null): PlanStep[] {
   const list = Array.isArray(raw?.steps) ? raw.steps : [];
   const taken = new Set<string>();
   return list
     .map((s: any) => {
-      const prompt = String(s?.prompt ?? "").trim();
+      let prompt = String(s?.prompt ?? "").trim();
       if (!prompt) return null;
+      // The planner's own bar for the step, handed to the desk that works it.
+      // It lives on the prompt rather than on the step because that is where a
+      // desk actually reads it - and a desk told what "finished" means stops
+      // one file short far less often than one told only what to write.
+      const done = String(s?.done ?? "").trim();
+      if (done) prompt = `${prompt}\n\n--- THIS STEP IS DONE WHEN ---\n${done}`;
       const roleKey = typeof s?.roleKey === "string" ? s.roleKey.trim() : null;
       // a key the model invented is worse than no key at all - it would route nowhere
       const known = roleKey && (roleSpec(presetId, roleKey) || store.state.workers.some((w) => w.role === roleKey));
@@ -270,7 +355,17 @@ export async function draftPlan(opts: {
 }): Promise<DraftResult> {
   const idea = opts.idea.trim();
   const presetId = opts.presetId ?? null;
-  const count = Math.max(2, Math.min(10, Number(opts.steps) || 5));
+  // A ceiling, not a target. A real project needs more pieces than five, and the
+  // old cap of ten was low enough that the planner had to merge unrelated work
+  // into one desk to fit - which is how a product arrives as a single file.
+  // Padding a small idea to hit a number is the opposite failure, so the brief
+  // says "as many as it needs, up to this" rather than "this many".
+  // The ceiling is a ceiling: ask for more and you get more. The default is
+  // lower than the ceiling on purpose, because the planner emits every step's
+  // instruction in one un-streamed reply and the free models this floor runs on
+  // manage about eight tokens a second - twelve steps is a twelve-minute wait
+  // before a single desk has started. Eight is a real team and a bearable wait.
+  const count = Math.max(2, Math.min(24, Number(opts.steps) || (opts.workspace ? 8 : 5)));
   const model = opts.model || store.state.settings.plannerModel || store.state.settings.defaultModel;
   // resolving the folder here means a bad path is an error on the whiteboard,
   // not eight desks discovering it one at a time
@@ -303,20 +398,37 @@ export async function draftPlan(opts: {
     return { plan, costUsd: 0 };
   }
 
+  // A build plan carries the shared contract, an instruction per step and the
+  // line that says when each step is done, so the budget is per step rather than
+  // a flat number: raising the step ceiling without raising this is how a plan
+  // comes back cut off inside step nine.
+  const budget = ws ? Math.min(12_000, 900 + count * 300) : 2600;
+
   const res = await gateway.complete({
     model,
     system: PLANNER_SYSTEM,
     prompt: ws ? buildDraftPrompt(idea, ws.root, presetId, count) : draftPrompt(idea, presetId, count),
     temperature: ws ? 0.35 : 0.6,
-    // a build plan carries the shared contract and a paragraph per step; it does
-    // not fit in the budget a list of essay prompts needs
-    maxTokens: ws ? 4000 : 2600,
-    signal: AbortSignal.timeout(ws ? 180_000 : 120_000),
+    maxTokens: budget,
+    // The free models this floor exists to use were measured at roughly 8
+    // tokens a second, and `complete` does not stream - nothing arrives until
+    // the whole plan does. So the wait is set from the budget at a deliberately
+    // pessimistic 5/s rather than from a flat number: the old 180s could not
+    // have finished a full 4000-token plan either, it just never had to,
+    // because the brief used to ask for something much smaller.
+    signal: AbortSignal.timeout(ws ? Math.min(1_200_000, 45_000 + budget * 200) : 120_000),
   });
 
   const parsed = extractJson(res.text);
   const steps = coerceSteps(parsed, presetId);
   if (!steps.length) throw new Error("the planner came back with no usable steps");
+
+  // A model that spent its whole budget was still writing when it was stopped,
+  // so `extractJson` will have rewound to the last whole step and the plan is
+  // short by however many it never reached. The steps that did arrive are worth
+  // running - but silently building two thirds of a product is worse than
+  // saying so, and the fix is one number, so the board says both.
+  const cutOff = res.tokensOut > 0 && res.tokensOut >= budget * 0.97;
 
   // A plan whose steps do not feed each other has no reason to queue: the whole
   // floor can take it at once. Only a real {{input}} makes it a chain.
@@ -337,7 +449,13 @@ export async function draftPlan(opts: {
   const plan = store.addPlan({
     title: String(opts.title || parsed?.title || idea.split("\n")[0]).slice(0, 70),
     idea,
-    summary: String(parsed?.summary ?? "").slice(0, 300),
+    summary: (
+      cutOff
+        ? `[the planner ran out of room after ${steps.length} steps - these are complete and worth running; ` +
+          `set a faster plannerModel if you want a longer plan] ` +
+          String(parsed?.summary ?? "")
+        : String(parsed?.summary ?? "")
+    ).slice(0, 300),
     presetId,
     steps,
     mode: chained ? "chain" : "split",

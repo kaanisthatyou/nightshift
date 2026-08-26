@@ -16,7 +16,10 @@ export default function OrderBar() {
   const openWhiteboard = useFloor((s) => s.openWhiteboard);
   const setTab = useFloor((s) => s.setTab);
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
+  // "sending" is a moment for an order and a minute or two for a planned build -
+  // the whiteboard call is a whole model round trip. Saying which one is
+  // happening is the difference between waiting and wondering.
+  const [sending, setSending] = useState<false | "order" | "planning">(false);
   // build is only offered once a folder is open - the switch is the folder
   const root = state?.settings.workspaceRoot ?? null;
   const [build, setBuild] = useState(false);
@@ -40,12 +43,26 @@ export default function OrderBar() {
   async function send() {
     const t = text.trim();
     if (!t || sending) return;
-    setSending(true);
+    const planned = building && !selected;
+    setSending(planned ? "planning" : "order");
     try {
       if (building) {
-        // a build takes minutes, not seconds - the floor reports back through
-        // the window rather than through this request
-        await post("/build", { text: t, workspace: root, workerId: selected || undefined, wait: false });
+        // Picking a desk means you want that desk. Leaving it on "whoever is
+        // free" means you want the floor - and the floor cannot share a job out
+        // until someone has cut it up, so that order goes through the
+        // whiteboard first. Without this the whole team was one model.
+        //
+        // A build takes minutes, not seconds: the floor reports back through
+        // the window rather than through this request.
+        const res = await post<{ plan?: { id: string } }>("/build", {
+          text: t,
+          workspace: root,
+          workerId: selected || undefined,
+          plan: selected ? false : "auto",
+          wait: false,
+        });
+        // work that got planned is happening on the board, not at one desk
+        if (res?.plan) setTab("plan");
       } else {
         await post("/orders", { text: t, workerId: selected || undefined, wait: false });
       }
@@ -71,8 +88,12 @@ export default function OrderBar() {
           build
         </button>
       </span>
-      <select value={selected ?? ""} onChange={(e) => select(e.target.value || null)}>
-        <option value="">▸ whoever is free</option>
+      <select
+        value={selected ?? ""}
+        onChange={(e) => select(e.target.value || null)}
+        title={building ? "leave this on the floor and the job gets cut up first; pick a desk to hand it to that desk alone" : undefined}
+      >
+        <option value="">{building ? "▸ the whole floor" : "▸ whoever is free"}</option>
         {workers.map((w) => (
           <option key={w.id} value={w.id}>
             desk {w.desk + 1} · {w.name} · {w.model.split("/").pop()}
@@ -104,8 +125,16 @@ export default function OrderBar() {
       >
         plan it
       </button>
-      <button className="btn primary" onClick={() => void send()} disabled={sending || !text.trim()}>
-        {sending ? "walking..." : building ? "build it" : "give order"}
+      <button className="btn primary" onClick={() => void send()} disabled={Boolean(sending) || !text.trim()}>
+        {sending === "planning"
+          ? "cutting it up..."
+          : sending
+            ? "walking..."
+            : building
+              ? selected
+                ? "build it"
+                : "put the floor on it"
+              : "give order"}
       </button>
     </div>
   );

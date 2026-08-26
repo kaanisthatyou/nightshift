@@ -1,0 +1,120 @@
+/* ---------------------------------------------------------------------------
+   The look: a quiet control room with one warm light in it.
+
+   The pixel office stays pixel. Everything around it stops being: the sprites
+   in web/src/pixel/ carry their own palette and never read a variable from
+   here, so the shell can be re-themed without touching a single pixel of the
+   room - and the room reads as deliberate art instead of as a skin the whole
+   application is stuck inside.
+
+   Every legacy token name is still defined below. Nothing in styles.css had to
+   change to move the app off the CRT look: `--mag` is simply no longer magenta
+   and `--px` is no longer two pixels.
+--------------------------------------------------------------------------- */
+
+:root {
+  /* ---- surfaces: a neutral with a slight blue bias, so the rust reads warm --- */
+  --ground:   #0e0f12;
+  --surface:  #16181d;
+  --raised:   #1e2128;
+  --sunken:   #0a0b0e;
+
+  --hairline:      rgba(255, 255, 255, 0.12);
+  --hairline-soft: rgba(255, 255, 255, 0.06);
+
+  --text:   #e7e8ea;
+  --text-2: #b0b3bb;
+  --muted:  #82868f;
+
+  /* One accent. It was already sitting in the old token block, unused, and it
+     is the only warm hue that holds its own next to the sprite palette. */
+  --accent:      #d97757;
+  --accent-lift: #e88f72;
+  --accent-soft: rgba(217, 119, 87, 0.13);
+  /* what sits on top of a filled accent - warm, not the page's own black */
+  --on-accent:   #1a0d07;
+
+  /* Semantic colour is for state only, and never competes with the accent. */
+  --ok:    #5fb87e;
+  --warn:  #d9a441;
+  --info:  #6aa9d9;
+  --crit:  #e06a62;
+
+  /* ---- type ---------------------------------------------------------------
+     No webfont: the floor is meant to run with the network down, and Silkscreen
+     is already embedded for the canvas. The shell uses whatever the machine
+     has, which on Windows means Segoe UI and Cascadia Mono. */
+  --font-ui: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text",
+             "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", "JetBrains Mono",
+               Menlo, Consolas, "Liberation Mono", monospace;
+  --font-pixel: "Silkscreen", "Courier New", monospace;
+
+  --radius: 5px;
+
+  /* ---- the old names, pointed at the new look ---------------------------- */
+  --ink:       var(--ground);
+  --panel:     var(--surface);
+  --panel-2:   var(--raised);
+  --line:      var(--hairline);
+  --line-soft: var(--hairline-soft);
+  --dim:       var(--muted);
+
+  --mag:   var(--accent);
+  --rust:  var(--accent);
+  --cyan:  var(--info);
+  --amber: var(--warn);
+  --green: var(--ok);
+  --red:   var(--crit);
+
+  /* hairlines, not the 2px rules that made every panel shout at the same
+     volume as every other panel */
+  --px: 1px;
+
+  color-scheme: dark;
+}
+
+/* Numbers that sit in columns - the ledger, token counts, latencies - stop
+   jittering as they tick. */
+.stat b,
+.chip,
+.gauge,
+.mono-out,
+.zoom,
+.no {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Data reads as data: model ids, paths, streamed output, shell lines. */
+.mono-out,
+.site,
+code,
+pre,
+.ws-row,
+.chip {
+  font-family: var(--font-mono);
+}
+
+/* ---- the framed live view ------------------------------------------------
+   An inset edge around the canvas. This is the whole trick that makes the
+   sprites look framed rather than like the application's own surface. */
+.stage {
+  box-shadow:
+    inset 0 0 0 1px var(--hairline-soft),
+    inset 0 0 90px rgba(0, 0, 0, 0.55);
+}
+
+/* The two places the pixel face survives: the mark, and the label on the
+   frame. Both belong to the office rather than to the interface. */
+.logo,
+.stage-tag {
+  font-family: var(--font-pixel);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

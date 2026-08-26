@@ -168,7 +168,10 @@ async function converse(
     const res = await gateway.chat({
       model,
       messages,
-      maxTokens: build ? 4000 : 1600,
+      // A build desk writes whole files through a tool call, so the reply has to
+      // carry the file. 4000 was enough for a stub and not for a real component,
+      // and a truncated write_file lands as a broken file rather than as an error.
+      maxTokens: build ? 8000 : 1600,
       signal: AbortSignal.timeout(build ? 300_000 : 180_000),
       onChunk,
       ...(offerTools ? { tools: defs } : {}),

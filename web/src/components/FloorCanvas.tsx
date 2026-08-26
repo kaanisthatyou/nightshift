@@ -86,7 +86,6 @@ export default function FloorCanvas() {
   return (
     <div className="stage">
       <canvas ref={ref} className="floor" />
-      <div className="crt" />
       <div className="stage-tag">
         FLOOR 13 // {workers} desks staffed // {busy} working
         {state && !state.gateway.online ? " // GHOST SHIFT" : ""}

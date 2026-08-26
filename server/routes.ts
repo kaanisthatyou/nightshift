@@ -411,10 +411,30 @@ api.get("/workspace/shell", (req, res) => {
 });
 
 /**
- * One order, straight into a folder. This is the short path: no whiteboard, no
- * plan - a single desk gets the working folder and is expected to come back
- * with files on disk. `wait` is on by default because whoever called this
- * usually wants to know whether it actually built.
+ * Is this bigger than one desk? An order that names a file and says one thing
+ * about it is faster on a single desk than through the whiteboard. Everything
+ * else - and "build me a X" is always everything else - is worth the planning
+ * call, because a lone desk handed a whole product writes the smallest thing
+ * that technically answers.
+ */
+function worthPlanning(text: string): boolean {
+  const words = text.trim().split(/\s+/).length;
+  if (words < 4) return false; // not an instruction yet, just a nudge
+  const namesOneFile = /\b[\w.-]+\.(ts|tsx|js|jsx|mjs|py|md|json|css|html|go|rs|java|rb|sh|ya?ml|toml)\b/.test(text);
+  if (namesOneFile && words <= 14) return false;
+  return true;
+}
+
+/**
+ * One order, straight into a folder. `plan` decides who takes it: absent or
+ * false is the short path - a single desk gets the working folder and is
+ * expected to come back with files on disk. `true` always goes through the
+ * whiteboard first, and `"auto"` lets the size of the ask decide, which is what
+ * the window sends when you have not pinned the job to a desk.
+ *
+ * `wait` is on by default for the single-desk path, because whoever called that
+ * usually wants to know whether it actually built. A planned order answers as
+ * soon as the board is cut, since the work then belongs to several desks.
  */
 api.post("/build", async (req, res) => {
   const b = req.body ?? {};
@@ -428,8 +448,12 @@ api.post("/build", async (req, res) => {
     return res.status(400).json({ error: err?.message ?? String(err) });
   }
 
-  // a plan is worth the extra call once the work is bigger than one desk
-  if (b.plan) {
+  // Who takes it. `true` always plans, `false` is one desk, `"auto"` lets the
+  // size of the ask decide - and an absent flag stays one desk, which is the
+  // contract every existing caller of this route was written against.
+  const wantsPlan = b.plan === "auto" ? worthPlanning(text) : Boolean(b.plan);
+
+  if (wantsPlan) {
     try {
       const { plan } = await draftPlan({
         idea: text,

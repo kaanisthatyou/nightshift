@@ -247,6 +247,17 @@ the check and whether it passed, `ok` is whether the task survived. **Read those
 summary.** A desk's own account of its work is the least reliable thing in the response —
 `files: []` with a confident paragraph means it wrote nothing.
 
+That call puts **one desk** on the whole job, which is right for a change and wrong for a
+product — a lone desk handed "build me an app" writes the smallest thing that technically
+answers. Pass `"plan":"auto"` to let the size of the ask decide instead: an order that names a
+file and says one thing about it still goes to one desk, and anything larger is cut up on the
+whiteboard first and shared across the floor. `"plan":true` always plans, `false` never does,
+and leaving it out keeps the one-desk behaviour this section describes.
+
+When it plans, the response is `{plan, job}` rather than the task shape below — there is no
+`files[]` to read, because the work is spread over several desks. Follow it with
+`GET /api/plans/<id>` and the tasks it names.
+
 Always pass `verify` when there is any command that can prove the work: `npm test`,
 `node index.js`, `pytest -q`, `tsc --noEmit`. Without it a desk decides for itself when it is
 finished, which is the failure mode the whole mode exists to remove. With it, a failure goes
