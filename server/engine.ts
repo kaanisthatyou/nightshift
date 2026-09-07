@@ -514,7 +514,9 @@ async function runTask(t: Task, w: Worker) {
 
       // once is the minute window; twice is that model's quota, and the router
       // (whatever combo omniroute has live) has other providers to spend
-      const toRouter = t.waits >= 2 && !t.modelOverride && model !== "auto" && gateway.status.online;
+      const toRouter =
+        store.state.settings.routerFallback !== false &&
+        t.waits >= 2 && !t.modelOverride && model !== "auto" && gateway.status.online;
       if (toRouter) {
         t.modelOverride = "auto";
         t.fallbackFrom = model;

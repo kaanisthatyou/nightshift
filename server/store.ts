@@ -78,6 +78,7 @@ function blankState(): FloorState {
       shellEnabled: true,
       shellExtra: [],
       repairRounds: 2,
+      routerFallback: true,
     },
   };
 }

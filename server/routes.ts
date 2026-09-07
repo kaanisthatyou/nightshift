@@ -104,6 +104,7 @@ api.post("/settings", (req, res) => {
   if (typeof b.buildMaxRounds === "number") s.buildMaxRounds = Math.max(6, Math.min(80, b.buildMaxRounds));
   if (typeof b.shellEnabled === "boolean") s.shellEnabled = b.shellEnabled;
   if (typeof b.repairRounds === "number") s.repairRounds = Math.max(0, Math.min(6, b.repairRounds));
+  if (typeof b.routerFallback === "boolean") s.routerFallback = b.routerFallback;
   if (Array.isArray(b.shellExtra)) {
     s.shellExtra = b.shellExtra.map((x: any) => String(x).trim().toLowerCase()).filter(Boolean).slice(0, 40);
   }

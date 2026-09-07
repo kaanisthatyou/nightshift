@@ -385,6 +385,12 @@ export interface FloorState {
     shellExtra: string[];
     /** how many times a desk may be handed its own failing check to repair */
     repairRounds: number;
+    /**
+     * When a desk's own model runs out of quota, hand the task to the gateway's
+     * router (`auto`) instead. Turn this off when the router has no pool of its
+     * own to fall back on - rerouting into an empty pool loses the task.
+     */
+    routerFallback: boolean;
   };
 }
 
