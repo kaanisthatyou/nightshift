@@ -105,6 +105,8 @@ nightshift --update                # installed it globally? this replaces it
 nightshift --version               # what you are actually running
 ```
 
+What changed between versions is in [CHANGELOG.md](CHANGELOG.md).
+
 From a clone it is `git pull && npm install && npm run build`. The check is a single
 request to the npm registry with a 2.5s leash — silence it with `--no-update-check` or
 `NIGHTSHIFT_NO_UPDATE_CHECK=1`, and it stays quiet on its own when you are offline.
@@ -412,7 +414,9 @@ Then just say *"nightshift these"* and hand over a batch.
 | POST | `/api/providers` | `{id, baseUrl?, key?, keys?, rpm?, concurrency?, enabled?, params?, models?}` — add or edit one |
 | POST | `/api/providers/keys` | `{text}` — paste keys, one per line |
 | DELETE | `/api/providers/:id` | drop a provider and its keys |
+| POST | `/api/providers/refresh` | ask every provider for its models again |
 | POST | `/api/routes` | `{id, models[]}` — an ordered quota pool; `auto` is the default one |
+| DELETE | `/api/routes/:id` | drop a route |
 | GET / POST | `/api/office` | the floor plan: `{layout}` or `{office:{name, rooms[]}}` |
 | POST | `/api/settings` | `{autoAssign?, ghostMode?, maxParallel?, defaultModel?, plannerModel?, reasoning?, routerFallback?, mcpEnabled?, mcpMaxRounds?, workspaceRoot?, buildMaxRounds?, shellEnabled?, repairRounds?, shellExtra?}` |
 | GET | `/api/presets` | the loadout catalog: crews, roles, tempers |
@@ -471,7 +475,7 @@ web/src/            the window
   pixel/sprites.ts    bakes art.ts to canvases, plus the people
   pixel/scene.ts      the renderer: rooms on a grid, rain, lighting, walking, bubbles
   components/         crew, plan, board, wire, mains panels + the whiteboard
-tools/              art review and key import
+tools/              art review, key import, and the checks `npm run check` runs
 shared/             types both sides agree on
   presets.ts          the crew loadouts, roles and tempers
   providers.ts        the built-in provider presets
