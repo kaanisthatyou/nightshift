@@ -1,15 +1,15 @@
 // The whiteboard. An idea goes up, and comes down as steps a desk can actually do.
 //
 // Planning does not run through the floor - no desk animates, nobody gets a task.
-// It is one call to the gateway that returns JSON, which is why it uses
-// gateway.complete() rather than the streaming chat the workers use.
+// It is one streamed call to the model router that returns JSON.
 
 import fs from "node:fs";
 import path from "node:path";
-import { dispatch, gateway, wake } from "./engine.ts";
+import { dispatch, gateway, releaseWaves, wake } from "./engine.ts";
 import { store, blankStep } from "./store.ts";
 import { PRESETS, preset, roleSpec } from "../shared/presets.ts";
-import { openWorkspace, tree } from "./workspace.ts";
+import { install, openWorkspace, tree } from "./workspace.ts";
+import { scaffold, stack, stackMenu } from "./templates.ts";
 import type { Plan, PlanStep, Worker } from "../shared/types.ts";
 
 const PLANNER_SYSTEM =
@@ -189,68 +189,77 @@ function survey(root: string): string {
 
 /**
  * The build brief. This is a different job from cutting an idea into essays:
- * the steps have to divide a filesystem, and anything crossing a file boundary
- * has to be pinned down here, because the desks cannot talk to each other.
+ * the steps have to divide a filesystem, run in waves, and agree on every name
+ * that crosses a file boundary - because the desks cannot talk to each other,
+ * the contract written here is the only conversation they get.
  */
-function buildDraftPrompt(idea: string, root: string, presetId: string | null, count: number): string {
+function buildDraftPrompt(idea: string, root: string, presetId: string | null, count: number, hasProject: boolean): string {
   return [
-    `The floor is working inside a real project folder: ${root}`,
+    `You are the tech lead of a team of ${count} AI engineers. Turn the request below into a build plan they can`,
+    `execute in parallel inside the project folder ${root}.`,
     "",
+    "# The folder right now",
     survey(root),
     "",
-    "Cut the idea below into steps that WRITE FILES into that folder.",
-    "",
-    "Each step is done by one small, cheap model that has exactly six tools:",
-    "list_files, read_file, write_file, edit_file, run (build tooling only), finish.",
-    "",
-    "This is a whole floor, not one model. Plan for what the idea actually deserves - the finished thing a",
-    "competent team would hand over - and then divide that. Do not shrink the product to fit the desks.",
-    "",
-    "Rules:",
-    `- Use as many steps as the work genuinely needs, up to ${count}. Do not pad a small idea to reach that`,
-    "  number, and do not compress a real product into four steps - a step that quietly carries three unrelated",
-    "  concerns is one desk doing the whole job badly.",
-    "- Scope it like a product, not a demo. Pick the stack the idea actually calls for and say so: a real",
-    "  framework, real dependencies, a real dependency manifest. A build tool the desks install is fine - they",
-    "  can run npm, pip, cargo and the rest. Do not fall back to a single static file to keep things simple.",
-    "- Every step must leave a complete, non-trivial slice behind: real logic, real state, real error handling,",
-    "  the styling the thing needs to look finished. No placeholder copy, no 'TODO: implement', no stub that",
-    "  returns an empty array, no file that only re-exports another.",
-    "- Every step must list, in `files`, the exact paths it owns. Two steps must never claim the same path;",
-    "  the floor refuses a write outside a step's own list, so an overlap becomes a blocked desk.",
-    "- Between them the steps must cover a project that actually runs: entry point, config, dependency",
-    "  manifest, and anything the entry point imports. Nothing may be left 'to be added later'.",
-    "- The desks cannot see each other's work while they write. So pin every shared contract in `summary`:",
-    "  exact file paths, exported names, function signatures, route paths, data shapes. Then repeat the",
-    "  relevant half of that contract inside the prompt of every step that touches it.",
-    "- Each step's prompt stands on its own: which files to create, what goes in each, and what it may assume",
-    "  already exists. Write it as an instruction to a competent junior, not as a summary.",
-    "- Write those prompts tight. Dense instruction, no preamble, no restating the idea back, no encouragement -",
-    "  every wasted sentence is a wasted second, and this plan is being written by a slow model. Ambition belongs",
-    "  in what you ask for, never in how many words you use to ask.",
-    "- Give every step a `done` line: the one observable thing that is true when that step is genuinely",
-    "  finished. Write it as something a reader could check, not as a restatement of the title.",
-    "- If the folder has no project skeleton yet, the first step creates it - manifest, config, folder layout,",
-    "  and the shared types or interfaces the later steps import.",
-    "- `verify` is one command that proves the whole thing works when run in that folder, e.g. `npm run build`,",
-    "  `npm test`, `node index.js --check`, `pytest -q`, `tsc --noEmit`. It must be real: a command the plan's own",
-    "  files make runnable. If nothing sensible can be checked, use an empty string.",
-    "- No step may be 'review', 'coordinate' or 'document the plan'. Every step leaves files on disk.",
-    "",
-    "Roster:",
-    rosterFor(presetId),
-    "",
-    "Idea:",
+    "# Request",
     idea,
     "",
-    "Return exactly this JSON shape:",
-    '{"title":"short name for the whole thing",' +
-    '"summary":"the approach, and the exact shared contract every step must obey",' +
-    '"verify":"the one command that proves it works",' +
-    '"steps":[{"title":"short step name","prompt":"the full self-contained instruction",' +
-    '"roleKey":"key from the roster","files":["exact/path.ts","another/path.ts"],' +
-    '"done":"the observable thing that is true when this step is finished",' +
-    '"note":"why this step exists, one short line"}]}',
+    "# Stacks the floor sets up before anyone starts (config written, dependencies installed)",
+    stackMenu(),
+    hasProject
+      ? 'The folder already has a project. Use "stack": "none" and plan against what is there.'
+      : "Pick the stack the request calls for. For any website, landing page, portfolio, dashboard or web app choose\n" +
+        "react-vite unless the user explicitly asked for something else. Never downgrade a web product to static.",
+    "",
+    "# How the team works",
+    "- Each engineer is a capable but literal AI model with file tools. It sees the request, your summary, your",
+    "  contract, the file map and its own step prompt. It cannot see teammates' work in progress or talk to them.",
+    "- Steps run in waves. Every step in a wave works at the same time; the next wave starts when the whole wave",
+    "  before it has landed.",
+    "  - Wave 1: the foundation others import - global CSS with the design tokens (src/index.css), shared types,",
+    "    the content/data file, small reusable UI primitives. Keep wave 1 to 1-2 steps: everyone waits for it.",
+    "  - Wave 2: the features, all at once - one step per page section, page or feature module. Most steps go here.",
+    "  - Wave 3 (only if needed): assembly that needs wave 2 on disk - App.tsx composing the sections, routing,",
+    "    navigation wiring. One step.",
+    "- Each step owns 1-4 files, listed exactly in `files`. No file is owned by two steps. Config already exists",
+    "  (package.json, vite.config.ts, tsconfig.json, src/main.tsx); only claim index.html or src/index.css if the",
+    "  step really changes them (index.html for <title>, meta and Google Fonts links).",
+    `- Use as many steps as the work deserves, up to ${count}. A polished portfolio or landing page is typically 6-9.`,
+    "- Scope it like a finished product a studio would ship, not a demo. No step is 'review', 'test' or 'docs'.",
+    "",
+    "# The contract - the most important thing you write",
+    "Compact markdown that settles everything two engineers could otherwise disagree on:",
+    "1. Visual direction in one sentence with a concrete aesthetic (e.g. 'editorial, Swiss grid, warm off-white,",
+    "   one vermilion accent'). Exact palette as hex values WITH the Tailwind v4 @theme token names that wave 1",
+    "   defines (--color-ink: #111114 -> classes bg-ink, text-ink). Font families (Google Fonts) and the token names",
+    "   (--font-display, --font-sans), type scale for h1/h2/body, radius, section spacing (py-20 md:py-28 is a good",
+    "   default; whichever you pick, exactly one component owns it).",
+    "2. Every file in the plan: path, exports (exact names; say default or named), props with TypeScript types,",
+    "   one line on what it renders.",
+    "3. Shared data as TypeScript interfaces, and which file exports which constant.",
+    "4. Page structure: section order and the section ids the navigation links to.",
+    "5. The content: names, roles, tagline, and specific believable facts to use everywhere (companies, years,",
+    "   metrics, project names) - invent them if the request does not give them, and keep them consistent.",
+    "6. Visuals: there are no image files. For every place a picture would go (project thumbnails, portrait, product",
+    "   shots) say what illustration is built in JSX - e.g. a browser frame with a miniature dashboard in the",
+    "   project's colour - and which component draws it. Plan the page's rhythm too: which sections sit on a tinted",
+    "   or dark band, and which use an asymmetric or bento layout, so the page does not repeat one centred column.",
+    "",
+    "# Each step prompt",
+    "Say concretely what to build in its files: layout at mobile and desktop, the elements, interactions, states,",
+    "animation, and the details that make it excellent - not 'a hero section'. Every desk already receives the",
+    "whole contract, so never restate it: no palette, no prop types, no content facts, no file map - refer to them",
+    "by name ('the Project interface', 'the dark band'). 3-6 dense sentences, no filler. The plan is written by a",
+    "slow model and everyone waits for it: every sentence that repeats the contract is time nobody gets back.",
+    "",
+    "# Roster (roleKey values)",
+    rosterFor(presetId),
+    "",
+    "Return ONLY this JSON, nothing before or after it:",
+    '{"title":"short name","stack":"react-vite","summary":"2-3 sentences: what is being built and how",' +
+      '"contract":"the markdown contract as one string (use \\n for newlines)","deps":[],' +
+      '"verify":"npm run build","steps":[{"wave":1,"title":"short step name","roleKey":"key from the roster",' +
+      '"files":["src/exact/path.tsx"],"prompt":"the step instruction","done":"one observable line that is true when this step is finished"}]}',
   ].join("\n");
 }
 
@@ -261,16 +270,18 @@ function expandPrompt(step: PlanStep, plan: Plan, count: number): string {
     "",
     "Break this single step into smaller steps, each finishable by one small model in one reply.",
     `Give ${count} sub-steps. Keep the same intent - do not widen the scope.`,
+    plan.kind === "build" ? "Split its files between the sub-steps; every file of the original goes to exactly one." : "",
     "",
     "Roster:",
     rosterFor(plan.presetId),
     "",
     `Step title: ${step.title}`,
+    step.claims.length ? `Step files: ${step.claims.join(", ")}` : "",
     "Step instruction:",
     step.prompt || step.title,
     "",
-    'Return exactly this JSON shape:',
-    '{"steps":[{"title":"...","prompt":"...","roleKey":"...","note":"..."}]}',
+    "Return exactly this JSON shape:",
+    '{"steps":[{"title":"...","prompt":"...","roleKey":"...","files":[],"note":"..."}]}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -288,34 +299,41 @@ export function coerceSteps(raw: any, presetId: string | null): PlanStep[] {
     .map((s: any) => {
       let prompt = String(s?.prompt ?? "").trim();
       if (!prompt) return null;
-      // The planner's own bar for the step, handed to the desk that works it.
-      // It lives on the prompt rather than on the step because that is where a
-      // desk actually reads it - and a desk told what "finished" means stops
-      // one file short far less often than one told only what to write.
       const done = String(s?.done ?? "").trim();
       if (done) prompt = `${prompt}\n\n--- THIS STEP IS DONE WHEN ---\n${done}`;
       const roleKey = typeof s?.roleKey === "string" ? s.roleKey.trim() : null;
-      // a key the model invented is worse than no key at all - it would route nowhere
       const known = roleKey && (roleSpec(presetId, roleKey) || store.state.workers.some((w) => w.role === roleKey));
-      // a planner that names the same file twice would deadlock two desks against
-      // each other, so the first claim on a path wins and the rest is dropped
       const claims = (Array.isArray(s?.files) ? s.files : Array.isArray(s?.claims) ? s.claims : [])
-        .map((f: any) => String(f ?? "").trim().replace(/^\.\//, "").replace(/^[\\/]+/, ""))
+        .map((f: any) => String(f ?? "").trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/^[\\/]+/, ""))
         .filter(Boolean)
         .filter((f: string) => {
           if (taken.has(f)) return false;
           taken.add(f);
           return true;
         });
+      const wave = Math.max(1, Math.min(9, Math.floor(Number(s?.wave) || 1)));
       return blankStep({
         title: String(s?.title ?? prompt.split("\n")[0]).slice(0, 70),
         prompt,
         roleKey: known ? roleKey : null,
         note: s?.note ? String(s.note).slice(0, 160) : null,
         claims,
+        wave,
       });
     })
     .filter(Boolean) as PlanStep[];
+}
+
+/** A contract can come back as a string, a list of lines or an object. Any of them is a contract. */
+function coerceContract(raw: unknown): string {
+  if (typeof raw === "string") return raw.trim();
+  if (Array.isArray(raw)) return raw.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join("\n").trim();
+  if (raw && typeof raw === "object") {
+    return Object.entries(raw as Record<string, unknown>)
+      .map(([k, v]) => `## ${k}\n${typeof v === "string" ? v : JSON.stringify(v, null, 2)}`)
+      .join("\n\n");
+  }
+  return "";
 }
 
 /** What the whiteboard says when there is nothing on the other end of the wire. */
@@ -355,20 +373,11 @@ export async function draftPlan(opts: {
 }): Promise<DraftResult> {
   const idea = opts.idea.trim();
   const presetId = opts.presetId ?? null;
-  // A ceiling, not a target. A real project needs more pieces than five, and the
-  // old cap of ten was low enough that the planner had to merge unrelated work
-  // into one desk to fit - which is how a product arrives as a single file.
-  // Padding a small idea to hit a number is the opposite failure, so the brief
-  // says "as many as it needs, up to this" rather than "this many".
-  // The ceiling is a ceiling: ask for more and you get more. The default is
-  // lower than the ceiling on purpose, because the planner emits every step's
-  // instruction in one un-streamed reply and the free models this floor runs on
-  // manage about eight tokens a second - twelve steps is a twelve-minute wait
-  // before a single desk has started. Eight is a real team and a bearable wait.
-  const count = Math.max(2, Math.min(24, Number(opts.steps) || (opts.workspace ? 8 : 5)));
+  // A build plan is sized by the floor: there is no point cutting twelve steps
+  // for four desks, and no reason to stop at eight when thirty are sitting there.
+  const desks = Math.max(1, store.state.workers.length);
+  const count = Math.max(2, Math.min(32, Number(opts.steps) || (opts.workspace ? Math.max(4, Math.min(12, desks)) : 5)));
   const model = opts.model || store.state.settings.plannerModel || store.state.settings.defaultModel;
-  // resolving the folder here means a bad path is an error on the whiteboard,
-  // not eight desks discovering it one at a time
   const ws = opts.workspace ? openWorkspace(opts.workspace) : null;
   const kind: Plan["kind"] = ws ? "build" : "text";
 
@@ -398,76 +407,68 @@ export async function draftPlan(opts: {
     return { plan, costUsd: 0 };
   }
 
-  // A build plan carries the shared contract, an instruction per step and the
-  // line that says when each step is done, so the budget is per step rather than
-  // a flat number: raising the step ceiling without raising this is how a plan
-  // comes back cut off inside step nine.
-  const budget = ws ? Math.min(12_000, 900 + count * 300) : 2600;
+  const hasProject = Boolean(ws && fs.existsSync(path.join(ws.root, "package.json")));
+  const budget = ws ? Math.min(20_000, 3_000 + count * 700) : 2600;
 
-  const res = await gateway.complete({
+  // streamed, so a slow provider shows progress instead of a frozen board
+  let chars = 0;
+  let nextShout = 2500;
+  const res = await gateway.chat({
     model,
     system: PLANNER_SYSTEM,
-    prompt: ws ? buildDraftPrompt(idea, ws.root, presetId, count) : draftPrompt(idea, presetId, count),
-    temperature: ws ? 0.35 : 0.6,
+    prompt: ws ? buildDraftPrompt(idea, ws.root, presetId, count, hasProject) : draftPrompt(idea, presetId, count),
+    temperature: ws ? 0.4 : 0.6,
     maxTokens: budget,
-    // The free models this floor exists to use were measured at roughly 8
-    // tokens a second, and `complete` does not stream - nothing arrives until
-    // the whole plan does. So the wait is set from the budget at a deliberately
-    // pessimistic 5/s rather than from a flat number: the old 180s could not
-    // have finished a full 4000-token plan either, it just never had to,
-    // because the brief used to ask for something much smaller.
-    signal: AbortSignal.timeout(ws ? Math.min(1_200_000, 45_000 + budget * 200) : 120_000),
+    reasoning: store.state.settings.reasoning ?? "low",
+    idleMs: 6 * 60_000,
+    signal: AbortSignal.timeout(ws ? 30 * 60_000 : 5 * 60_000),
+    onChunk: (s) => {
+      chars += s.length;
+      if (chars >= nextShout) {
+        nextShout += 2500;
+        store.emitEvent({ type: "boss.say", text: `tahta: ${Math.round(chars / 1000)}k karakter...`, data: { whiteboard: true } });
+      }
+    },
   });
 
   const parsed = extractJson(res.text);
   const steps = coerceSteps(parsed, presetId);
   if (!steps.length) throw new Error("the planner came back with no usable steps");
 
-  // A model that spent its whole budget was still writing when it was stopped,
-  // so `extractJson` will have rewound to the last whole step and the plan is
-  // short by however many it never reached. The steps that did arrive are worth
-  // running - but silently building two thirds of a product is worse than
-  // saying so, and the fix is one number, so the board says both.
-  const cutOff = res.tokensOut > 0 && res.tokensOut >= budget * 0.97;
-
-  // A plan whose steps do not feed each other has no reason to queue: the whole
-  // floor can take it at once. Only a real {{input}} makes it a chain.
-  //
-  // A build plan is different. Step one usually writes the manifest everything
-  // else installs against, so it goes out in order by default - file ownership
-  // makes `split` safe to choose, but it is not the safe default.
-  const chained = ws || steps.some((s) => s.prompt.includes("{{input}}") || s.prompt.includes("{{prev}}"));
-
-  // the planner picks the check unless you named one yourself
+  const cutOff = res.finishReason === "length" || (res.tokensOut > 0 && res.tokensOut >= budget * 0.97);
+  const chained = !ws && steps.some((s) => s.prompt.includes("{{input}}") || s.prompt.includes("{{prev}}"));
   const check = ws ? (opts.verify ?? String(parsed?.verify ?? "").trim()) || null : null;
+  let stackId = ws ? String(parsed?.stack ?? "").trim().toLowerCase() : "";
+  if (hasProject || !stack(stackId)) stackId = "";
 
-  // planning is real spend - it belongs in the same ledger as everything else
   store.state.ledger.tokensIn += res.tokensIn;
   store.state.ledger.tokensOut += res.tokensOut;
-  store.state.ledger.costUsd += res.costUsd;
+  store.state.ledger.costUsd += res.costUsd ?? 0;
 
   const plan = store.addPlan({
     title: String(opts.title || parsed?.title || idea.split("\n")[0]).slice(0, 70),
     idea,
     summary: (
       cutOff
-        ? `[the planner ran out of room after ${steps.length} steps - these are complete and worth running; ` +
-          `set a faster plannerModel if you want a longer plan] ` +
+        ? `[the planner ran out of room after ${steps.length} steps - these are complete and worth running] ` +
           String(parsed?.summary ?? "")
         : String(parsed?.summary ?? "")
-    ).slice(0, 300),
+    ).slice(0, 600),
     presetId,
     steps,
-    mode: chained ? "chain" : "split",
+    mode: ws ? "waves" : chained ? "chain" : "split",
     status: "draft",
     jobId: null,
-    draftedBy: res.model,
+    draftedBy: res.decision ?? res.model,
     ghost: false,
     kind,
     workspace: ws?.root ?? null,
-    verify: check,
+    verify: check ?? (stackId ? stack(stackId)!.verify || null : null),
+    stack: stackId || null,
+    contract: ws ? coerceContract(parsed?.contract).slice(0, 24_000) || null : null,
   });
-  return { plan, costUsd: res.costUsd };
+  plan.deps = Array.isArray(parsed?.deps) ? parsed.deps.map(String).slice(0, 12) : [];
+  return { plan, costUsd: res.costUsd ?? 0 };
 }
 
 /** One step becomes several. The rest of the plan stays where it is. */
@@ -483,10 +484,10 @@ export async function expandStep(plan: Plan, stepId: string, count = 3): Promise
       system: PLANNER_SYSTEM,
       prompt: expandPrompt(step, plan, Math.max(2, Math.min(6, count))),
       temperature: 0.6,
-      maxTokens: 1800,
-      signal: AbortSignal.timeout(90_000),
+      maxTokens: 3000,
+      signal: AbortSignal.timeout(10 * 60_000),
     });
-    fresh = coerceSteps(extractJson(res.text), plan.presetId);
+    fresh = coerceSteps(extractJson(res.text), plan.presetId).map((s) => ({ ...s, wave: step.wave ?? 1 }));
     store.state.ledger.tokensIn += res.tokensIn;
     store.state.ledger.tokensOut += res.tokensOut;
     store.state.ledger.costUsd += res.costUsd;
@@ -498,12 +499,12 @@ export async function expandStep(plan: Plan, stepId: string, count = 3): Promise
         prompt: step.prompt,
         roleKey: step.roleKey,
         note: "split offline - edit before sending down",
+        wave: step.wave ?? 1,
       }),
     );
   }
   if (!fresh.length) throw new Error("nothing came back to split it into");
 
-  // the step it came from is replaced by its own pieces
   plan.steps.splice(i, 1, ...fresh);
   store.touch();
   return fresh;
@@ -511,8 +512,8 @@ export async function expandStep(plan: Plan, stepId: string, count = 3): Promise
 
 /**
  * Which desk should take this step. A pin wins, then the role, then anyone.
- * `spread` is for a split: waiting behind the one desk that holds a role would
- * make a parallel plan run in single file, so an unclaimed desk beats a queue.
+ * `spread` is for parallel work: waiting behind the one desk that holds a role
+ * would make a parallel plan run in single file, so an unclaimed desk beats a queue.
  */
 export function deskFor(step: PlanStep, taken: Set<string>, spread = false): Worker | null {
   if (step.workerId) {
@@ -525,50 +526,89 @@ export function deskFor(step: PlanStep, taken: Set<string>, spread = false): Wor
   if (spread) {
     const free = store.state.workers.find((w) => !taken.has(w.id));
     if (free) return free;
+    return null; // more steps than desks: whoever frees up first takes it
   }
-  if (byRole.length) return byRole[0]; // the specialist is worth a queue
+  if (byRole.length) return byRole[0];
   return null;
 }
 
 /**
+ * Lay the stack down and install it before the first wave sits down. Doing
+ * this once, on the floor, is the difference between eight desks writing
+ * components and eight desks each trying to remember how vite is configured.
+ */
+async function prepare(plan: Plan, jobId: string) {
+  const s = stack(plan.stack ?? null);
+  const root = plan.workspace;
+  if (s && root && s.id !== "static") {
+    const deps = plan.deps ?? [];
+    const laid = scaffold(root, s, plan.title, deps);
+    if (!laid.skipped) {
+      store.emitEvent({
+        type: "boss.say",
+        text: `iskeleti kuruyorum: ${s.name}`,
+        data: { planId: plan.id, stack: s.id, files: laid.wrote },
+      });
+    }
+    if (!fs.existsSync(path.join(root, "node_modules"))) {
+      store.emitEvent({ type: "shell.run", text: "npm install", data: { planId: plan.id } });
+      const res = await install(root);
+      store.emitEvent({
+        type: "verify",
+        text: `npm install ${res.ok ? "ok" : "failed"} (${Math.round(res.ms / 1000)}s)`,
+        data: { ok: res.ok, planId: plan.id, preview: res.text.slice(-400) },
+      });
+      if (!res.ok) {
+        store.emitEvent({ type: "system", text: `npm install failed - the desks will see it: ${res.text.slice(-300)}` });
+      }
+    }
+  }
+  releaseWaves(jobId);
+}
+
+/**
  * Cut the plan into real work. `chain` makes a pipeline where each step feeds
- * the next; `split` throws every step onto the floor at once.
+ * the next; `split` throws every step onto the floor at once; `waves` sends the
+ * steps out a wave at a time, which is what a build plan does.
  */
 export function runPlan(plan: Plan, mode?: Plan["mode"]) {
   const steps = plan.steps.filter((s) => s.enabled && s.prompt.trim());
   if (!steps.length) throw new Error("no enabled steps with a prompt");
   plan.mode = mode ?? plan.mode;
+  const build = plan.kind === "build" && Boolean(plan.workspace);
+  if (build && plan.mode === "chain") plan.mode = "waves";
 
-  const kind = plan.mode === "split" ? "batch" : "pipeline";
+  const kind = plan.mode === "split" ? "batch" : plan.mode === "waves" ? "waves" : "pipeline";
   const ids: string[] = [];
   const job = store.addJob(plan.title, ids, kind);
-  const taken = new Set<string>();
 
-  const build = plan.kind === "build" && Boolean(plan.workspace);
+  // desks are handed out wave by wave: a desk busy in wave 1 is free again for wave 2
+  const takenByWave = new Map<number, Set<string>>();
 
   steps.forEach((step, i) => {
-    const desk = deskFor(step, taken, plan.mode === "split");
+    const wave = plan.mode === "waves" ? step.wave ?? 1 : plan.mode === "split" ? 1 : i + 1;
+    const taken = takenByWave.get(wave) ?? new Set<string>();
+    takenByWave.set(wave, taken);
+    const desk = deskFor(step, taken, plan.mode !== "chain");
     if (desk) taken.add(desk.id);
     const task = store.addTask({
       title: step.title,
       prompt: step.prompt,
-      system: null, // the desk answers as itself - that is the point of hiring a role
+      system: null,
       workerId: desk?.id ?? null,
       createdBy: "pipeline",
-      // a chain releases one step at a time; a split goes out together
-      stage: plan.mode === "split" ? "queued" : i === 0 ? "queued" : "backlog",
+      // a chain releases one step at a time, waves release by wave after the
+      // stack is laid, and a split goes out together
+      stage: plan.mode === "split" ? "queued" : plan.mode === "chain" && i === 0 ? "queued" : "backlog",
       jobId: job.id,
       stepIndex: i,
       planId: plan.id,
       retriesLeft: 1,
       workspace: build ? plan.workspace : null,
-      // a step the planner gave no files to would be locked out of the folder
-      // entirely, which is worse than letting it work anywhere
       claims: build ? (step.claims?.length ? step.claims : ["**"]) : [],
-      // no step carries the plan's check - see settlePlan, which runs it once
-      // the whole job has landed and puts a desk on repairing what it finds
       verify: null,
     });
+    task.wave = wave;
     step.taskId = task.id;
     ids.push(task.id);
   });
@@ -578,13 +618,14 @@ export function runPlan(plan: Plan, mode?: Plan["mode"]) {
   plan.status = "running";
 
   if (plan.mode === "split") {
-    // a bell wakes the whole floor
     for (const w of store.state.workers) wake(w.id);
+  } else if (plan.mode === "waves") {
+    void prepare(plan, job.id);
   } else {
-    // the boss walks the first order over himself; the rest follow the chain
     dispatch(ids[0], store.task(ids[0])?.workerId ?? null, steps[0].title);
   }
 
+  const waves = new Set(steps.map((s) => s.wave ?? 1)).size;
   store.emitEvent({
     type: "plan.run",
     text: `${plan.title}: ${steps.length} is masalara dagitiliyor`,
@@ -592,7 +633,12 @@ export function runPlan(plan: Plan, mode?: Plan["mode"]) {
   });
   store.emitEvent({
     type: "boss.say",
-    text: plan.mode === "split" ? "hepiniz ayni anda basliyorsunuz." : "sirayla. ilk masa baslasin.",
+    text:
+      plan.mode === "split"
+        ? "hepiniz ayni anda basliyorsunuz."
+        : plan.mode === "waves"
+          ? `${waves} dalga. once temel, sonra hepiniz birden.`
+          : "sirayla. ilk masa baslasin.",
     data: { planId: plan.id },
   });
   store.touch();

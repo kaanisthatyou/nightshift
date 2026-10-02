@@ -1,8 +1,12 @@
 // The shift itself: who works on what, when, and what it costs.
+import fs from "node:fs";
+import path from "node:path";
 import { ModelRouter, RateLimited } from "./router.ts";
 import { asOpenAiTools, mcp } from "./mcp.ts";
-import { NATIVE_NAMES, asOpenAiNative, nativeTools, runNative, shell, verify } from "./workspace.ts";
+import { NATIVE_NAMES, asOpenAiNative, deskCheck, nativeTools, runNative, shell, verify } from "./workspace.ts";
 import { store } from "./store.ts";
+import { CUT_OFF_NOTE, buildBriefing, repairNote } from "./brief.ts";
+import { stack } from "./templates.ts";
 import {
   ACCEPT_LINES, COFFEE_LINE, DONE_LINES, FAIL_LINES, GHOST_NOTE, IDLE_LINES, fallbackLine, pick,
 } from "./flavor.ts";
@@ -53,7 +57,7 @@ function previousOutput(t: Task): string {
   if (t.workspace) return "";
   if (!t.jobId || t.stepIndex === 0) return "";
   const job = store.job(t.jobId);
-  if (!job) return "";
+  if (!job || job.kind !== "pipeline") return "";
   const prevId = job.taskIds[t.stepIndex - 1];
   return store.task(prevId)?.output ?? "";
 }
@@ -71,7 +75,7 @@ async function ghostRun(t: Task, onChunk: (s: string) => void) {
 }
 
 /** Tool results can be enormous. A desk gets the useful head of one, not all of it. */
-const TOOL_RESULT_CAP = 6000;
+const TOOL_RESULT_CAP = 12_000;
 
 /**
  * What is kept on the task afterwards. The model needs the whole result to work
@@ -93,31 +97,6 @@ function deskTools(w: Worker) {
   return all.filter((t) => picked.includes(t.qualified) || picked.includes(t.name));
 }
 
-/**
- * What a desk in build mode is told before anything else. Cheap models default
- * to answering with a code block; this is the paragraph that stops them.
- */
-function buildBriefing(t: Task): string {
-  const owned = t.claims.length && t.claims[0] !== "**"
-    ? `You own these files and only these: ${t.claims.join(", ")}. Another desk owns the rest of the project - ` +
-      "assume their files will exist, import them as if they do, and do not write them yourself."
-    : "You own the whole project folder.";
-  return [
-    "You are working inside a real folder on the user's machine, with real tools.",
-    "",
-    "How work is delivered here:",
-    "- Code you print in your reply is thrown away. Only what you pass to write_file exists.",
-    "- Call list_files first to see what is already there. Never assume a file's contents - read_file it.",
-    "- Write complete, runnable files. No '...rest of the code' comments, no placeholders, no TODO stubs.",
-    `- ${owned}`,
-    t.verify
-      ? `- When your files are written, run: ${t.verify} - and fix whatever it reports. ` +
-        "The job is not done while that command fails."
-      : "- Prefer to run the project's own build or test command to check yourself before finishing.",
-    "- When it is genuinely done, call finish with a short summary. Do not call finish before the files exist.",
-  ].join("\n");
-}
-
 /** Which native tools are on the desk, given the master switches. */
 function floorTools(t: Task) {
   if (!t.workspace) return [];
@@ -125,14 +104,86 @@ function floorTools(t: Task) {
 }
 
 /**
+ * The type check a desk runs over its own files when it says it is done: the
+ * stack's own, or tsc when the folder is a TypeScript project with it installed.
+ */
+function checkFor(t: Task): string | null {
+  if (!t.workspace) return null;
+  const plan = t.planId ? store.plan(t.planId) : undefined;
+  const s = stack(plan?.stack ?? null);
+  if (s?.typecheck) return s.typecheck;
+  if (s && !s.typecheck) return null;
+  const ts = fs.existsSync(path.join(t.workspace, "tsconfig.json")) &&
+    fs.existsSync(path.join(t.workspace, "node_modules", "typescript"));
+  return ts ? "npx tsc --noEmit -p ." : null;
+}
+
+/** Files every other task on the same job owns - so a desk's check can tell "missing" from "coming". */
+function teammatesClaims(t: Task): string[] {
+  if (!t.jobId) return [];
+  const job = store.job(t.jobId);
+  if (!job) return [];
+  return job.taskIds
+    .filter((id) => id !== t.id)
+    .flatMap((id) => store.task(id)?.claims ?? [])
+    .filter((c) => c !== "**");
+}
+
+/**
+ * Old rounds of a long conversation are mostly bulk the model has already acted
+ * on: whole files it wrote, whole files it read. Every one of those is re-sent,
+ * re-read and paid for on every round after - and on a provider doing fifteen
+ * tokens a second, a prompt that doubles is a desk that halves. Anything older
+ * than the last few messages is cut down to what it was, not what it said. The
+ * files are on disk; a desk that needs one again reads it again.
+ */
+function compact(messages: any[], keepTail = 6) {
+  const cut = messages.length - keepTail;
+  for (let i = 0; i < cut; i++) {
+    const m = messages[i];
+    if (m._compact) continue;
+    if (m.role === "assistant" && Array.isArray(m.tool_calls)) {
+      for (const call of m.tool_calls) {
+        const raw = call.function?.arguments;
+        if (typeof raw !== "string" || raw.length < 600) continue;
+        try {
+          const args = JSON.parse(raw);
+          for (const key of ["content", "find", "replace"]) {
+            if (typeof args[key] === "string" && args[key].length > 300) {
+              const lines = args[key].split("\n").length;
+              args[key] = `[${lines} lines - already applied to disk; read_file to see the current file]`;
+            }
+          }
+          call.function.arguments = JSON.stringify(args);
+        } catch {
+          call.function.arguments = "{}";
+        }
+      }
+      m._compact = true;
+    } else if (m.role === "tool" && typeof m.content === "string" && m.content.length > 1500) {
+      m.content = `${m.content.slice(0, 500)}\n...[older output trimmed - run the tool again if you need it]`;
+      m._compact = true;
+    }
+  }
+}
+
+/** The wire must not carry our bookkeeping. */
+const wire = (messages: any[]) =>
+  messages.map((m) => {
+    if (!("_compact" in m)) return m;
+    const { _compact, ...rest } = m;
+    return rest;
+  });
+
+/**
  * The tool loop. Runs the model, executes whatever it asked for, feeds the
  * results back, and repeats until it answers in words or burns its rounds.
- * With no tools on the desk this is a single pass and behaves exactly as before.
+ * With no tools on the desk this is a single pass.
  *
- * In build mode it does one more thing: when the desk says it is finished, the
- * verify command runs, and a failure goes straight back into the same
- * conversation as work to repair. That loop is the whole difference between a
- * model that writes code and a desk that gets something working.
+ * Every round is a separate request, and the router is free to serve each one
+ * from a different key or provider - the conversation is the state, not the
+ * connection. In build mode, a desk that says it is finished gets its own files
+ * type-checked, and what fails goes straight back into the same conversation.
  */
 async function converse(
   t: Task,
@@ -145,16 +196,16 @@ async function converse(
   const native = floorTools(t);
   const tools = deskTools(w);
   const defs = [...asOpenAiNative(native), ...asOpenAiTools(tools)];
+  const check = build ? checkFor(t) : null;
   const messages: any[] = [];
-  if (system) messages.push({ role: "system", content: system });
-  if (build) messages.push({ role: "system", content: buildBriefing(t) });
+  const persona = build ? [system, buildBriefing(t, check)].filter(Boolean).join("\n\n") : system;
+  if (persona) messages.push({ role: "system", content: persona });
   messages.push({ role: "user", content: t.sentPrompt ?? t.prompt });
 
-  const maxRounds = build
-    ? Math.max(6, store.state.settings.buildMaxRounds || 28)
-    : Math.max(1, store.state.settings.mcpMaxRounds || 6);
-  let repairsLeft = build && t.verify ? Math.max(0, store.state.settings.repairRounds ?? 2) : 0;
-  const reasoning = w.reasoning ?? store.state.settings.reasoning ?? "low";
+  const s = store.state.settings;
+  const maxRounds = build ? Math.max(6, s.buildMaxRounds || 30) : Math.max(1, s.mcpMaxRounds || 6);
+  let repairsLeft = build ? Math.max(0, s.repairRounds ?? 2) : 0;
+  const reasoning = w.reasoning ?? s.reasoning ?? "low";
 
   let last: ChatResult | null = null;
   let summary = "";
@@ -169,13 +220,12 @@ async function converse(
     // words. A build task keeps them: an unfinished build should say it is
     // unfinished, not narrate the code it never wrote.
     const offerTools = defs.length > 0 && (build || left > 0);
+    if (build) compact(messages);
     const res = await gateway.chat({
       model,
-      messages,
-      // A build desk writes whole files through a tool call, so the reply has to
-      // carry the file. 4000 was enough for a stub and not for a real component,
-      // and a truncated write_file lands as a broken file rather than as an error.
-      maxTokens: build ? 8000 : 1600,
+      messages: wire(messages),
+      maxTokens: build ? 12_000 : 2_400,
+      temperature: build ? 0.3 : 0.5,
       reasoning,
       // a provider that buffers a whole tool call sends nothing until it is done;
       // a 10k-token file at fifteen tokens a second is eleven silent minutes
@@ -204,7 +254,6 @@ async function converse(
       },
       ...(offerTools ? { tools: defs } : {}),
     });
-    // usage is per call - the task should show what the whole conversation cost
     tokensIn += res.tokensIn;
     tokensOut += res.tokensOut;
     if (res.costUsd != null) costUsd += res.costUsd;
@@ -228,31 +277,80 @@ async function converse(
         })),
       });
 
-      for (const call of res.toolCalls) {
-        const record = await invoke(t, w, call.name, call.arguments);
+      // file writes are independent of each other; running them together is
+      // the same work in less wall time, and a desk that sends five files at
+      // once should not wait on them one by one
+      // - but a command or a finish has to see those files, so those go after, in order
+      const PARALLEL = new Set(["write_file", "read_file", "list_files", "search_files"]);
+      const records: ToolCall[] = new Array(res.toolCalls.length);
+      await Promise.all(
+        res.toolCalls.map(async (call, i) => {
+          if (PARALLEL.has(call.name)) records[i] = await invoke(t, w, call.name, call.arguments, res.finishReason);
+        }),
+      );
+      for (let i = 0; i < res.toolCalls.length; i++) {
+        const call = res.toolCalls[i];
+        if (!records[i]) records[i] = await invoke(t, w, call.name, call.arguments, res.finishReason);
+      }
+      res.toolCalls.forEach((call, i) => {
+        const record = records[i];
         if (call.name === "finish" && record.ok) {
           finished = true;
           summary = record.result;
         }
         messages.push({ role: "tool", tool_call_id: call.id, content: record.result });
-      }
-      // the desk goes back to thinking while the next round starts
+      });
       store.setWorkerState(w.id, "thinking", null);
+    } else if (build && res.finishReason === "length") {
+      messages.push({ role: "assistant", content: res.text || "(cut off)" });
+      messages.push({ role: "user", content: CUT_OFF_NOTE });
+      continue;
+    } else if (build && !t.files.length && left > 0) {
+      // a build desk that answered in prose has not started yet - say so once more
+      messages.push({ role: "assistant", content: res.text || "" });
+      messages.push({
+        role: "user",
+        content: "Nothing has been written to disk. Code in a reply is discarded - use write_file for every file you own, then call finish.",
+      });
+      continue;
     }
 
     if (!finished) {
-      // running out of rounds silently is how a build ends up half-written -
-      // say so while there is still time to close the files off
       const tail = messages.at(-1);
       if (build && left <= 3 && left > 0 && tail && typeof tail.content === "string") {
         tail.content +=
-          `\n\n[floor] ${left} tool ${left === 1 ? "call" : "calls"} left on this task. ` +
+          `\n\n[floor] ${left} ${left === 1 ? "round" : "rounds"} left on this task. ` +
           "Finish the file you are on, then call finish.";
       }
       continue;
     }
 
     // The desk says it is done. In build mode that claim gets checked.
+    if (build && check && repairsLeft > 0 && t.files.length) {
+      store.setWorkerState(w.id, "thinking", "kontrol ediyorum...");
+      const verdict = await deskCheck(t, check, teammatesClaims(t));
+      t.verifyRuns.push({
+        command: check,
+        ok: verdict.ok,
+        code: verdict.ok ? 0 : 1,
+        output: verdict.report.slice(0, 3000) || "no errors in this desk's files",
+        ms: 0,
+      });
+      if (t.verifyRuns.length > 3) t.verifyRuns.splice(0, t.verifyRuns.length - 3);
+      store.emitEvent({
+        type: "verify", workerId: w.id, taskId: t.id,
+        text: `${w.name}: ${verdict.ok ? "tip kontrolu temiz" : "tip hatasi var"}`,
+        data: { ok: verdict.ok, command: check, preview: verdict.report.slice(0, 300) },
+      });
+      if (!verdict.ok) {
+        repairsLeft -= 1;
+        messages.push({ role: "user", content: repairNote(verdict.report) });
+        store.emitEvent({ type: "worker.say", workerId: w.id, taskId: t.id, text: "tip hatasi, duzeltiyorum." });
+        continue;
+      }
+    }
+
+    // a task that carries its own check (a single order, a fixer) has to leave it passing
     if (build && t.verify && repairsLeft > 0) {
       store.setWorkerState(w.id, "thinking", "kontrol ediyorum...");
       const v = await verify(t, w);
@@ -262,38 +360,26 @@ async function converse(
           role: "user",
           content:
             `The check failed. This is not done yet.\n\n$ ${v.command}\n${v.output}\n\n` +
-            "Read the files you wrote, fix the actual cause, and run the check again. " +
-            "Do not call finish until it passes.",
+            "Read the files involved, fix the actual cause, and run the check again. Do not call finish until it passes.",
         });
-        store.emitEvent({
-          type: "worker.say", workerId: w.id, taskId: t.id,
-          text: "check patladi, duzeltiyorum.",
-        });
+        store.emitEvent({ type: "worker.say", workerId: w.id, taskId: t.id, text: "check patladi, duzeltiyorum." });
         continue;
       }
     }
     break;
   }
 
-  // A build desk that wrote nothing did not do the job, whatever it wrote back.
   if (build && !t.files.length) {
-    throw new Error(
-      "the desk answered in prose without writing a single file - nothing landed in the working folder",
-    );
+    throw new Error("the desk answered in prose without writing a single file - nothing landed in the working folder");
   }
 
-  // And a build with a check has to leave it passing. If the desk burned its
-  // rounds, or its repairs, without getting there, this is a failure - which
-  // sends it back to the floor with the files it already wrote still on disk,
-  // so whoever picks it up next repairs rather than starts over.
   if (build && t.verify) {
-    const seen = t.verifyRuns.at(-1) ?? (await verify(t, w));
+    const seen = t.verifyRuns.filter((v) => v.command === t.verify).at(-1) ?? (await verify(t, w));
     if (seen && !seen.ok) {
       throw new Error(`the check never passed: ${seen.command}\n${seen.output.slice(0, 1200)}`);
     }
   }
 
-  const totalCost = costUsd > 0 ? costUsd : null;
   return {
     text: summary || last?.text || "",
     tokensIn,
@@ -301,7 +387,7 @@ async function converse(
     decision: last?.decision ?? null,
     model: last?.model ?? model,
     ghost: false,
-    costUsd: totalCost,
+    costUsd: costUsd > 0 ? costUsd : null,
     toolCalls: [],
     finishReason: last?.finishReason ?? null,
     hops: Math.max(0, lanes.size - 1),
@@ -309,13 +395,8 @@ async function converse(
 }
 
 /** Run one tool call, record it on the task, and hand back what to tell the model. */
-async function invoke(t: Task, w: Worker, name: string, rawArgs: string): Promise<ToolCall> {
+async function invoke(t: Task, w: Worker, name: string, rawArgs: string, finishReason: string | null): Promise<ToolCall> {
   const seq = `tc_${t.toolCalls.length}`;
-  /**
-   * Record it and hand it back. The returned `result` is what the model is told,
-   * capped at what a desk can usefully read; the copy pushed onto the task is
-   * shorter still, because that one is carried by every state broadcast.
-   */
   const keep = (rec: ToolCall) => {
     if (rec.result.length > TOOL_RESULT_CAP) {
       rec.result = `${rec.result.slice(0, TOOL_RESULT_CAP)}\n...[truncated ${rec.result.length - TOOL_RESULT_CAP} chars]`;
@@ -327,6 +408,7 @@ async function invoke(t: Task, w: Worker, name: string, rawArgs: string): Promis
           ? `${rec.result.slice(0, TOOL_RECORD_CAP)}\n...[${rec.result.length - TOOL_RECORD_CAP} more chars, shown to the desk]`
           : rec.result,
     });
+    if (t.toolCalls.length > 120) t.toolCalls.splice(0, t.toolCalls.length - 120);
     store.touch();
     return rec;
   };
@@ -335,15 +417,16 @@ async function invoke(t: Task, w: Worker, name: string, rawArgs: string): Promis
   try {
     args = rawArgs ? JSON.parse(rawArgs) : {};
   } catch {
-    // small models hand back almost-JSON often enough to be worth saying so plainly
     return keep({
       id: seq, server: "?", tool: name, args: {},
-      result: `arguments were not valid JSON: ${rawArgs.slice(0, 200)}`, ok: false, ms: 0,
+      result:
+        finishReason === "length"
+          ? `${CUT_OFF_NOTE}\n(the arguments ended at: ...${rawArgs.slice(-120)})`
+          : `arguments were not valid JSON: ${rawArgs.slice(0, 200)}`,
+      ok: false, ms: 0,
     });
   }
 
-  // The floor's own toolbox comes first - a desk with a working folder reaches
-  // for these far more often than for anything an MCP server offers.
   if (t.workspace && NATIVE_NAMES.has(name)) {
     const started = Date.now();
     store.setWorkerState(w.id, name === "run" ? "delivering" : "typing", shortSay(name, args));
@@ -376,10 +459,7 @@ async function invoke(t: Task, w: Worker, name: string, rawArgs: string): Promis
   const tool = mcp.find(name, w.mcpIds ?? []);
   const started = Date.now();
   if (!tool) {
-    return keep({
-      id: seq, server: "?", tool: name, args,
-      result: `no such tool: ${name}`, ok: false, ms: 0,
-    });
+    return keep({ id: seq, server: "?", tool: name, args, result: `no such tool: ${name}`, ok: false, ms: 0 });
   }
 
   store.setWorkerState(w.id, "delivering", `${tool.name}...`);
@@ -398,9 +478,7 @@ async function invoke(t: Task, w: Worker, name: string, rawArgs: string): Promis
     ok = false;
   }
 
-  const rec = keep({
-    id: seq, server: tool.server, tool: tool.name, args, result, ok, ms: Date.now() - started,
-  });
+  const rec = keep({ id: seq, server: tool.server, tool: tool.name, args, result, ok, ms: Date.now() - started });
   store.emitEvent({
     type: "tool.result", workerId: w.id, taskId: t.id,
     text: `${tool.qualified} ${ok ? "ok" : "failed"}`,
@@ -468,7 +546,7 @@ async function runTask(t: Task, w: Worker) {
     store.emitEvent({ type: "worker.chunk", workerId: w.id, taskId: t.id, text });
   };
   const onChunk = (s: string) => {
-    t.output += s;
+    if (t.output.length < 40_000) t.output += s;
     buffer += s;
     if (!typed) {
       typed = true;
@@ -481,12 +559,7 @@ async function runTask(t: Task, w: Worker) {
   try {
     let result: ChatResult;
     if (gateway.status.online) {
-      result = await converse(
-        t, w, model,
-        // an explicit system on the task wins; otherwise the desk answers as itself
-        t.system ?? w.persona ?? HOUSE_RULES,
-        onChunk,
-      );
+      result = await converse(t, w, model, t.system ?? w.persona ?? HOUSE_RULES, onChunk);
       t.ghost = false;
     } else if (store.state.settings.ghostMode) {
       const text = await ghostRun(t, onChunk);
@@ -554,7 +627,6 @@ async function runTask(t: Task, w: Worker) {
         text: `${model}: every key is resting - waiting ${secs}s`,
         data: { rateLimited: true, waitMs: err.waitMs, model },
       });
-      // the desk comes back when the window does, not on the usual 2.6s timer
       setTimeout(() => {
         const back = store.worker(w.id);
         if (back && back.state === "coffee") {
@@ -582,7 +654,7 @@ async function runTask(t: Task, w: Worker) {
         data: { fallbackFrom: model },
       });
       store.touch();
-      return; // the finally block below hands the desk back
+      return;
     }
     w.stats.tasksFailed += 1;
     w.stats.streak = 0;
@@ -591,15 +663,13 @@ async function runTask(t: Task, w: Worker) {
     store.emitEvent({ type: "worker.fail", workerId: w.id, taskId: t.id, text: t.error ?? "unknown failure" });
     store.nudgeMorale(w.id, -14);
 
-    // a retry budget means the work goes back on the pile - and to a different desk
     if (t.retriesLeft > 0) {
       t.retriesLeft -= 1;
       t.error = null;
       t.workerId = null;
       t.stage = "queued";
       store.emitEvent({
-        type: "system",
-        taskId: t.id,
+        type: "system", taskId: t.id,
         text: `${t.title}: baska masaya veriliyor (${t.retriesLeft} deneme kaldi)`,
         data: { retry: true },
       });
@@ -609,7 +679,6 @@ async function runTask(t: Task, w: Worker) {
 
     store.setStage(t.id, "failed");
     advanceJob(t);
-    // one broken step kills a pipeline; a batch just counts it and carries on
     const job = store.job(t.jobId);
     if (job && job.kind === "pipeline") {
       job.stage = "failed";
@@ -622,9 +691,10 @@ async function runTask(t: Task, w: Worker) {
     setTimeout(() => {
       const still = store.worker(w.id);
       if (!still || (still.state !== "delivering" && still.state !== "burnt")) return;
-      // nobody grinds forever: every fourth job, or when they're miserable, they walk off
+      // a desk with work queued on it goes straight back to it - coffee is for quiet nights
+      const waiting = store.state.tasks.some((x) => x.stage === "queued" && (x.workerId === still.id || !x.workerId));
       const earned = still.stats.tasksDone > 0 && still.stats.tasksDone % 4 === 0;
-      if (earned || still.morale < 30) {
+      if (!waiting && (earned || still.morale < 30)) {
         store.setWorkerState(still.id, "coffee", COFFEE_LINE);
         store.emitEvent({ type: "worker.say", workerId: still.id, text: COFFEE_LINE });
         setTimeout(() => {
@@ -642,26 +712,36 @@ async function runTask(t: Task, w: Worker) {
   }
 }
 
-/** Queue the next step of a pipeline once a step lands. Batches just tally up. */
+const settled = (t: Task | undefined) => !t || t.stage === "review" || t.stage === "done" || t.stage === "failed";
+
+/** Queue the next step of a pipeline, the next wave of a plan, or tally a batch. */
 function advanceJob(t: Task) {
   if (!t.jobId) return;
   const job = store.job(t.jobId);
   if (!job) return;
+  const tasks = job.taskIds.map((i) => store.task(i)).filter(Boolean) as Task[];
+
+  const close = () => {
+    const failed = tasks.filter((x) => x.stage === "failed").length;
+    job.stage = failed && job.kind !== "waves" ? "failed" : "done";
+    // a wave plan with a failed step is not over: the final check and the fixer
+    // are exactly what picks up after a desk that could not finish
+    settlePlan(job.id, failed && job.kind !== "waves" ? "failed" : "done");
+    store.emitEvent({
+      type: "job.done",
+      text: `${job.title}: ${tasks.length - failed}/${tasks.length} geldi`,
+      data: { jobId: job.id, ok: !failed },
+    });
+    store.touch();
+  };
 
   if (job.kind === "batch") {
-    const tasks = job.taskIds.map((i) => store.task(i)).filter(Boolean) as Task[];
-    const open = tasks.filter((x) => x.stage === "queued" || x.stage === "running" || x.stage === "backlog");
-    if (!open.length) {
-      const failed = tasks.filter((x) => x.stage === "failed").length;
-      job.stage = failed ? "failed" : "done";
-      settlePlan(job.id, failed ? "failed" : "done");
-      store.emitEvent({
-        type: "job.done",
-        text: `${job.title}: ${tasks.length - failed}/${tasks.length} geldi`,
-        data: { jobId: job.id, ok: !failed },
-      });
-      store.touch();
-    }
+    if (tasks.every(settled)) close();
+    return;
+  }
+
+  if (job.kind === "waves") {
+    releaseWaves(job.id);
     return;
   }
 
@@ -670,16 +750,48 @@ function advanceJob(t: Task) {
     const nt = store.task(next);
     if (nt && nt.stage === "backlog") {
       nt.stage = "queued";
-      // the desk it is pinned to may have dozed off waiting its turn, and a
-      // sleeping desk is skipped by the tick - the step would wait for ever
       wake(nt.workerId);
       store.emitEvent({ type: "task.stage", taskId: nt.id, text: "queued", data: { via: "pipeline" } });
       store.touch();
     }
   } else {
-    job.stage = "done";
-    settlePlan(job.id, "done");
-    store.emitEvent({ type: "job.done", text: `${job.title} cleared the floor`, data: { jobId: job.id, ok: true } });
+    close();
+  }
+}
+
+/**
+ * Release the next wave of a wave job, or close the job when nothing is left.
+ * A wave goes out only when every task of the waves before it has settled.
+ */
+export function releaseWaves(jobId: string) {
+  const job = store.job(jobId);
+  if (!job) return;
+  const tasks = job.taskIds.map((i) => store.task(i)).filter(Boolean) as Task[];
+  {
+    const open = tasks.filter((x) => !settled(x));
+    const releasable = open.filter((x) => x.stage === "backlog");
+    const busy = open.filter((x) => x.stage !== "backlog");
+    if (!open.length) {
+      const failed = tasks.filter((x) => x.stage === "failed").length;
+      job.stage = "done";
+      settlePlan(job.id, "done");
+      store.emitEvent({
+        type: "job.done",
+        text: `${job.title}: ${tasks.length - failed}/${tasks.length} geldi`,
+        data: { jobId: job.id, ok: !failed },
+      });
+      store.touch();
+      return;
+    }
+    if (busy.length || !releasable.length) return;
+    const next = Math.min(...releasable.map((x) => x.wave ?? 1));
+    const wave = releasable.filter((x) => (x.wave ?? 1) === next);
+    for (const nt of wave) {
+      nt.stage = "queued";
+      wake(nt.workerId);
+      store.emitEvent({ type: "task.stage", taskId: nt.id, text: "queued", data: { via: "wave", wave: next } });
+    }
+    store.emitEvent({ type: "boss.say", text: `dalga ${next}: ${wave.length} masa basliyor.`, data: { wave: next } });
     store.touch();
   }
 }
@@ -690,10 +802,6 @@ function settlePlan(jobId: string, status: "done" | "failed") {
   if (!plan || plan.status !== "running") return;
   plan.status = status;
   store.touch();
-  // Every desk has now written its own files and nobody has run the thing,
-  // which is exactly the state this mode exists to prevent. No individual step
-  // carries the check: a desk owns a few files, and a build usually breaks
-  // between two of them rather than inside one.
   if (status === "done" && plan.kind === "build" && plan.workspace && plan.verify) {
     void finalCheck(plan);
   }
@@ -715,26 +823,31 @@ async function finalCheck(plan: Plan) {
     data: { ok: res.ok, planId: plan.id, command: plan.verify, ms: res.ms, preview: res.text.slice(0, 400) },
   });
   if (res.ok) {
-    store.emitEvent({ type: "boss.say", text: "calisiyor. herkese iyi geceler." });
+    store.emitEvent({ type: "boss.say", text: "calisiyor. herkese iyi geceler.", data: { planId: plan.id, final: true } });
     store.touch();
     return;
   }
 
   plan.status = "failed";
+  const failed = plan.steps
+    .map((s) => store.task(s.taskId))
+    .filter((x): x is Task => Boolean(x && x.stage === "failed"));
   const t = store.addTask({
     title: `fix: ${plan.title}`,
     prompt: [
-      `The project in this folder does not pass its own check yet.`,
+      "The project in this folder does not pass its check yet. Make it pass.",
       "",
       `$ ${plan.verify}`,
-      res.text.slice(0, 4000),
+      res.text.slice(-5000),
       "",
-      "Several desks wrote different parts of this, each able to see only its own files, so the fault is most",
-      "likely between two of them rather than inside one: a name that does not match, an import that points",
-      "nowhere, a missing dependency, a test runner nobody configured. You own the whole folder - fix it wherever",
-      "it actually is, and simplify the setup if that is what makes it pass.",
-      "Read what is actually there, fix the real cause, run the check again, and only then finish.",
-    ].join("\n"),
+      failed.length
+        ? `These steps did not finish, so their files may be missing or partial: ${failed.map((f) => `${f.title} (${f.claims.join(", ")})`).join("; ")}. Write whatever is missing, to the standard of the rest of the project.`
+        : "",
+      "Several engineers wrote different parts of this at once, so the fault is most likely between two files:",
+      "an export name that does not match its import, props that differ from the contract, a missing file.",
+      "You own the whole folder. Read the failing lines, fix the real cause with edit_file (do not rewrite working",
+      "files from scratch, do not delete features to make errors go away), run the check, and finish when it passes.",
+    ].filter(Boolean).join("\n"),
     createdBy: "boss",
     stage: "queued",
     planId: plan.id,
@@ -782,7 +895,6 @@ export function tick() {
     .filter((t) => t.stage === "queued" && !running.has(t.id))
     .sort((a, b) => a.createdAt - b.createdAt);
 
-  // a desk that already has something queued on it is not free, even if it looks idle
   const claimed = new Set(
     s.tasks
       .filter((t) => (t.stage === "queued" || t.stage === "running") && t.workerId)
@@ -797,19 +909,30 @@ export function tick() {
 
     let w = store.worker(t.workerId);
     if (w && (w.state === "asleep" || w.state === "coffee") && !w.currentTaskId) {
-      // work is waiting on this desk specifically - that is reason enough to
-      // put the light back on. It takes the job on the next tick.
       wake(w.id);
       continue;
     }
-    if (w && (w.state !== "idle" || w.currentTaskId)) continue;
+    if (w && (w.state !== "idle" || w.currentTaskId)) {
+      // the pinned desk is busy with something else: a split plan should not queue
+      // behind one desk while another sits idle, so a waiting wave task moves
+      if (t.jobId && store.job(t.jobId)?.kind !== "pipeline" && s.settings.autoAssign) {
+        const free = idleWorkers().filter((x) => !claimed.has(x.id));
+        if (free.length && (w.currentTaskId && store.task(w.currentTaskId)?.jobId === t.jobId)) {
+          const other = free.sort((a, b) => a.stats.tasksDone - b.stats.tasksDone)[0];
+          t.workerId = other.id;
+          claimed.add(other.id);
+          store.emitEvent({ type: "boss.order", taskId: t.id, workerId: other.id, text: t.title, data: { auto: true } });
+          holdUntil.set(t.id, Date.now() + THEATRE_MS);
+        }
+      }
+      continue;
+    }
     if (!w) {
       if (!s.settings.autoAssign) continue;
       const free = idleWorkers().filter((x) => !claimed.has(x.id));
       if (!free.length) continue;
       const servable = free.filter((x) => gateway.servable(x.model));
       const pool = servable.length ? servable : free;
-      // whoever is least loaded takes it
       w = pool.sort((a, b) => a.stats.tasksDone - b.stats.tasksDone)[0];
       t.workerId = w.id;
       claimed.add(w.id);

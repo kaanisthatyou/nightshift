@@ -179,6 +179,8 @@ export interface Task {
   decision: string | null;
   /** how many different keys or models carried this one conversation */
   hops?: number;
+  /** plan wave this task belongs to - wave 2 waits for wave 1 to land */
+  wave?: number;
   ghost: boolean;
   reviewNote: string | null;
   /** set when the desk's own model was unavailable and the route took over */
@@ -221,8 +223,8 @@ export interface Job {
   createdAt: number;
   taskIds: string[];
   stage: "running" | "done" | "failed";
-  /** pipeline: steps feed each other. batch: one list split across desks. */
-  kind: "pipeline" | "batch";
+  /** pipeline: steps feed each other. batch: one list split across desks. waves: batches in order. */
+  kind: "pipeline" | "batch" | "waves";
 }
 
 /** One line on the whiteboard, before it becomes work. */
@@ -239,6 +241,11 @@ export interface PlanStep {
   enabled: boolean;
   /** files this step owns, relative to the plan's working folder */
   claims: string[];
+  /**
+   * Which wave the step goes out in. Every step in a wave works at the same
+   * time; the next wave starts when the whole of this one has landed.
+   */
+  wave: number;
   /** set once the step has been cut into a task */
   taskId: string | null;
 }
@@ -251,8 +258,11 @@ export interface Plan {
   summary: string;
   presetId: string | null;
   steps: PlanStep[];
-  /** chain: each step feeds the next. split: every step goes out at once. */
-  mode: "chain" | "split";
+  /**
+   * chain: each step feeds the next. split: every step goes out at once.
+   * waves: steps go out together by wave number, a wave at a time.
+   */
+  mode: "chain" | "split" | "waves";
   status: "draft" | "running" | "done" | "failed";
   jobId: string | null;
   createdAt: number;
@@ -268,6 +278,12 @@ export interface Plan {
   workspace: string | null;
   /** the command every step has to leave passing, e.g. `npm run build` */
   verify: string | null;
+  /** starter the floor lays down before any desk starts, e.g. `react-vite` */
+  stack?: string | null;
+  /** the shared contract every desk on this plan is handed */
+  contract?: string | null;
+  /** extra packages the planner asked the floor to install with the stack */
+  deps?: string[];
 }
 
 export interface ModelInfo {

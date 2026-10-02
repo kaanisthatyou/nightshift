@@ -77,7 +77,7 @@ function blankState(): FloorState {
       workspaceRoot: null,
       // a real file takes a look, a write and a check; six rounds is a text
       // task's budget and nowhere near enough to build anything
-      buildMaxRounds: 28,
+      buildMaxRounds: 30,
       shellEnabled: true,
       shellExtra: [],
       repairRounds: 2,
@@ -131,7 +131,11 @@ class Store extends EventEmitter {
           if (p.kind !== "build") p.kind = "text";
           if (typeof p.workspace === "undefined") p.workspace = null;
           if (typeof p.verify === "undefined") p.verify = null;
-          for (const st of p.steps ?? []) if (!Array.isArray(st.claims)) st.claims = [];
+          if (p.mode !== "split" && p.mode !== "waves") p.mode = "chain";
+          for (const st of p.steps ?? []) {
+            if (!Array.isArray(st.claims)) st.claims = [];
+            if (!Number.isFinite(st.wave)) st.wave = 1;
+          }
         }
         // floors written before the rate-limit handling was in place were held at
         // four in flight because a burst was expensive to recover from. It is not
@@ -426,6 +430,7 @@ export const blankStep = (over: Partial<PlanStep> = {}): PlanStep => ({
   note: over.note ?? null,
   enabled: over.enabled ?? true,
   claims: over.claims ?? [],
+  wave: over.wave ?? 1,
   taskId: over.taskId ?? null,
 });
 

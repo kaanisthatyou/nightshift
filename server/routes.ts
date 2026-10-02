@@ -526,7 +526,7 @@ api.post("/build", async (req, res) => {
         verify: b.verify ?? null,
       });
       if (b.run === false) return res.json({ plan });
-      const { job } = runPlan(plan, b.mode === "split" ? "split" : "chain");
+      const { job } = runPlan(plan, b.mode === "split" ? "split" : b.mode === "chain" ? "chain" : undefined);
       return res.json({ plan, job });
     } catch (err: any) {
       return res.status(502).json({ error: err?.message ?? String(err) });
@@ -771,9 +771,12 @@ api.post("/plans", async (req, res) => {
           workerId: s?.workerId ?? null,
           note: s?.note ?? null,
           claims: Array.isArray(s?.files) ? s.files.map(String) : Array.isArray(s?.claims) ? s.claims.map(String) : [],
+          wave: Number.isFinite(Number(s?.wave)) ? Math.max(1, Number(s.wave)) : 1,
         }),
       ),
-      mode: b.mode === "split" ? "split" : "chain",
+      mode: b.mode === "split" ? "split" : b.mode === "waves" || (workspace && b.mode !== "chain") ? "waves" : "chain",
+      stack: typeof b.stack === "string" ? b.stack : null,
+      contract: typeof b.contract === "string" ? b.contract : null,
       status: "draft",
       jobId: null,
       draftedBy: "you",
@@ -805,7 +808,7 @@ api.post("/plans", async (req, res) => {
       verify: b.verify ?? null,
     });
     if (b.run) {
-      const { job } = runPlan(plan, b.mode === "split" ? "split" : "chain");
+      const { job } = runPlan(plan, b.mode === "split" ? "split" : b.mode === "chain" ? "chain" : undefined);
       return res.json({ plan, job });
     }
     res.json({ plan });
@@ -821,7 +824,9 @@ api.patch("/plans/:id", (req, res) => {
   const b = req.body ?? {};
   if (typeof b.title === "string" && b.title.trim()) plan.title = b.title.slice(0, 70);
   if (typeof b.summary === "string") plan.summary = b.summary.slice(0, 300);
-  if (b.mode === "chain" || b.mode === "split") plan.mode = b.mode;
+  if (b.mode === "chain" || b.mode === "split" || b.mode === "waves") plan.mode = b.mode;
+  if (typeof b.contract === "string" || b.contract === null) plan.contract = b.contract || null;
+  if (typeof b.stack === "string" || b.stack === null) plan.stack = b.stack || null;
   if (typeof b.presetId === "string" || b.presetId === null) plan.presetId = b.presetId;
   if (typeof b.verify === "string" || b.verify === null) plan.verify = b.verify ? String(b.verify).slice(0, 300) : null;
   if (Array.isArray(b.steps)) {
@@ -836,6 +841,7 @@ api.patch("/plans/:id", (req, res) => {
         workerId: s?.workerId ?? null,
         note: s?.note ?? null,
         enabled: s?.enabled !== false,
+        wave: Number.isFinite(Number(s?.wave)) ? Math.max(1, Number(s.wave)) : existing?.wave ?? 1,
         claims: Array.isArray(s?.claims)
           ? s.claims.map((c: any) => String(c).trim()).filter(Boolean)
           : Array.isArray(s?.files)
@@ -873,7 +879,8 @@ api.post("/plans/:id/run", (req, res) => {
   if (!plan) return res.status(404).json({ error: "no such plan" });
   if (plan.status === "running") return res.status(409).json({ error: "this plan is already on the floor" });
   try {
-    const { job, taskIds } = runPlan(plan, req.body?.mode === "split" ? "split" : req.body?.mode === "chain" ? "chain" : undefined);
+    const m = req.body?.mode;
+    const { job, taskIds } = runPlan(plan, m === "split" || m === "chain" || m === "waves" ? m : undefined);
     res.json({ plan, job, taskIds });
   } catch (err: any) {
     res.status(400).json({ error: err?.message ?? String(err) });

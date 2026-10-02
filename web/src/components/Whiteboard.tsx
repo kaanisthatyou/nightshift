@@ -22,6 +22,7 @@ const blank = (over: Partial<PlanStep> = {}): PlanStep => ({
   claims: [],
   taskId: null,
   ...over,
+  wave: over.wave ?? 1,
 });
 
 /**
