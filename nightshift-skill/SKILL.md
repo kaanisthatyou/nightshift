@@ -1,12 +1,13 @@
 ---
 name: nightshift
-description: "Use when work should be pushed down to cheap or free models instead of being done here — batches of small mechanical subtasks (renaming, rewriting, translating, summarising, generating variants, extracting fields, drafting boilerplate), or when the user says nightshift / delege et / ucuz modele ver / floor'a at. Also use to BUILD: when the user names a working folder and wants a project, script or change actually written into it, the floor's desks get real file and shell tools and a check that has to pass. Also use to see what the floor is doing, review finished work, or run a multi-step pipeline across desks. NIGHTSHIFT is a local pixel office at http://localhost:20200 backed by an OmniRoute gateway."
+description: "Use when work should be pushed down to cheap or free models instead of being done here — batches of small mechanical subtasks (renaming, rewriting, translating, summarising, generating variants, extracting fields, drafting boilerplate), or when the user says nightshift / delege et / ucuz modele ver / floor'a at. Also use to BUILD: when the user names a working folder and wants a project, script or change actually written into it, the floor's desks get real file and shell tools and a check that has to pass. Also use to see what the floor is doing, review finished work, or run a multi-step pipeline across desks. NIGHTSHIFT is a local pixel office at http://localhost:20200 that calls NVIDIA NIM, Groq, Gemini and other providers directly."
 ---
 
 # NIGHTSHIFT — you are the boss
 
 There is a floor of workers at `http://localhost:20200`. Each desk is an agent bound to a
-model served through OmniRoute (`http://localhost:20128/v1`). You dispatch orders over HTTP;
+model (`nim/z-ai/glm-5.3`, `groq/openai/gpt-oss-120b`, a route, or `auto`) that the floor calls
+directly, one lane per API key. You dispatch orders over HTTP;
 the user watches your avatar walk to the desk and say the prompt.
 
 You do the thinking. The floor does the volume — and, when you give it a folder, the typing:
@@ -20,9 +21,10 @@ curl -s localhost:20200/api/health
 
 - connection refused → the floor is not running. Tell the user to run `npm start` in their
   nightshift checkout. Do not fake it.
-- `gateway.online: false` → OmniRoute is down. Work still "runs" but every output is a
-  **ghost**: `"ghost": true`, body starts with `GHOST OUTPUT`. **Never use ghost output as
-  if it were real.** Say the gateway is down and offer to start it (`omniroute`).
+- `gateway.online: false` → no provider is answering, usually because no key has been added.
+  Work still "runs" but every output is a **ghost**: `"ghost": true`, body starts with
+  `GHOST OUTPUT`. **Never use ghost output as if it were real.** Say so, and tell the user to
+  paste a key under mains ▸ providers (or `POST /api/providers/keys {"text":"nvapi-..."}`).
 
 ## Staffing
 
@@ -32,15 +34,18 @@ curl -s "localhost:20200/api/models" | jq '.models[] | select(.free) | .id' | he
 curl -s localhost:20200/api/workers -H 'content-type: application/json' -d '{"model":"<model-id>"}'
 ```
 
-8 desks max. Prefer free models for grunt work; only put a paid model on a desk when the
-task genuinely needs the quality, and say so out loud — it lands on the payroll.
+The desk count is the office's: `GET /api/office` says how many rooms and desks there are, and
+`POST /api/office {"layout":"agency"}` (4 / 8 / 12 / 20 / 32 desks: `garage`, `floor13`,
+`studio`, `agency`, `campus`) makes room — ask the user before rebuilding their office. Prefer
+free models for grunt work; only put a paid model on a desk when the task genuinely needs the
+quality, and say so out loud — it lands on the payroll.
 
 Two things the model board will tell you, and you must repeat honestly:
-- `"unpriced": true` means OmniRoute reported **no price**, not that it is free. Never call
+- `"unpriced": true` means the provider reported **no price**, not that it is free. Never call
   an unpriced model free.
-- A model can be listed and still refuse to serve. The floor retries such a task once on
-  `auto` and stamps the result with `fallbackFrom`. If a task you read back has
-  `fallbackFrom` set, the desk's model did **not** do that work — say which one did.
+- `decision` on a task names the key and model that served its last round
+  (`nim#2 z-ai/glm-5.3`) and `hops` how many lanes carried it. If `fallbackFrom` is set, the
+  desk's own model did **not** do that work — the `auto` route did; say which one.
 
 ## Loadouts — hiring a crew, not a model
 
@@ -83,7 +88,7 @@ curl -s localhost:20200/api/orders -H 'content-type: application/json' -d '{
 ```
 
 Returns the task with `output`, `tokensIn/Out`, `costUsd`, `latencyMs`, `decision`
-(which provider actually served it) and `ghost`.
+(which key and model actually served it) and `ghost`.
 
 For several independent chunks, fire them with `"wait": false`, collect the ids, then read
 each back with `GET /api/tasks/<id>` — they run in parallel across desks (default 4 at once).
@@ -175,7 +180,8 @@ curl -s localhost:20200/api/plans/<planId>/run -H 'content-type: application/jso
 
 `chain` makes each step wait for the one above it, with `{{input}}` receiving its output —
 one failure stops the rest. `split` sends every step out at once across free desks, and
-nothing feeds anything. Steps with `"enabled": false` stay on the board.
+nothing feeds anything. `waves` sends steps out by their `wave` number — everything in wave 1
+together, then wave 2 — which is what build plans use. Steps with `"enabled": false` stay on the board.
 
 Steps route by `roleKey` to a desk holding that role, or by `workerId` to a pinned desk;
 with neither, they go to whoever is free. A step whose role nobody holds still runs — it
@@ -189,22 +195,29 @@ Poll `GET /api/plans/<planId>` for the plan plus its tasks.
 
 ## Volume without tripping a rate limit
 
-The floor runs all eight desks at once (`settings.maxParallel`, 8 by default). On a free tier
-that is eight requests a minute into one provider, so before a big batch:
+The floor keeps every key inside its own limit by itself: each key is a lane with its own
+requests-a-minute clock and in-flight cap, and a desk's next round goes to whichever lane is
+free. More keys is more throughput — `GET /api/providers` shows every lane, how busy it is and
+whether it is resting after a 429.
+
+To let work carry on past one provider's quota, make a route — an ordered pool of models:
 
 ```bash
-curl -s localhost:20200/api/combos                      # the gateway's pools, and which is live
-curl -s localhost:20200/api/combos/use -H 'content-type: application/json' \
-  -d '{"name":"<a round-robin or headroom combo>"}'     # spread the desks across providers
+curl -s localhost:20200/api/routes -H 'content-type: application/json' \
+  -d '{"id":"coders","models":["nim/z-ai/glm-5.3","nim/moonshotai/kimi-k2.6","groq/openai/gpt-oss-120b"]}'
+curl -s -X PATCH localhost:20200/api/workers/<id> -H 'content-type: application/json' -d '{"model":"route:coders"}'
 ```
 
-Desks sitting on `auto` follow the live combo; `auto/offline` picks whoever has the most
-rate-limit headroom left. Both beat pinning eight desks to one model id.
+A desk on a route keeps its conversation when the first model's keys run dry; the next round
+is served by the next model. `auto` is the route everyone spills onto.
 
-You do not have to handle 429 yourself. A rate-limited task waits exactly as long as the
-provider asked, keeps its retry budget, and moves to the router if it is told to wait twice —
-`GET /api/tasks/<id>` reports it as `waits`, with `fallbackFrom` set if it was rerouted. A task
-still sitting at `queued` with `waits > 0` is waiting out a window, not stuck.
+You do not have to handle 429 yourself. A task only waits when every lane that could serve it
+is resting; `GET /api/tasks/<id>` reports that as `waits`. A task still sitting at `queued`
+with `waits > 0` is waiting out a window, not stuck.
+
+Thinking models on a slow provider can spend a whole reply thinking. `settings.reasoning`
+(`low` by default) caps it for the floor; `PATCH /api/workers/<id> {"reasoning":"medium"}`
+for one desk.
 
 ## The toolbox — when a desk needs more than words
 
@@ -270,6 +283,13 @@ curl -s localhost:20200/api/plans -H 'content-type: application/json' \
   -d '{"idea":"<the whole thing>", "workspace":"<folder>", "stepCount":4, "verify":"npm test", "run":true}'
 ```
 
+For a new project the planner picks a stack (`react-vite`, `vanilla-vite`, `node-api`,
+`static`) and the floor lays it down and runs `npm install` before any desk starts. It also
+writes a `contract` — design tokens, every file's exports and props, data shapes, content —
+that every desk receives. Read `plan.contract` on the draft: it is the thing most worth
+fixing by hand (`PATCH /api/plans/<id> {"contract":"..."}`) if something is off, because every
+desk builds to it.
+
 Each step owns a set of files and is refused the rest, so the steps cannot overwrite one
 another. Two things are worth checking on the draft before it runs, and both are cheap:
 
@@ -278,8 +298,12 @@ another. Two things are worth checking on the draft before it runs, and both are
 
 Fix either by `PATCH /api/plans/<id>` with corrected `steps[].files` before running it.
 
-Build plans default to `chain` — step one usually writes the manifest the rest install
-against. `split` is safe to choose once you have read the claims, and is much faster.
+Build plans run as `waves`: the foundation step(s) first, then every feature step at once,
+then assembly. A desk's own files are type-checked when it says it is finished, so most
+mistakes are repaired at the desk before the whole-project check ever runs.
+
+A plan drafted by a slow model can take several minutes; the request stays open until the
+plan exists. Pass a generous client timeout, or watch `GET /api/plans` for it.
 
 When the job lands the check runs once, and a failing check puts a desk that owns the whole
 folder onto repairing it. So a plan that ends `failed` is not necessarily finished failing —

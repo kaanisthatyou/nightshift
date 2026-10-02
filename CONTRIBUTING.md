@@ -12,7 +12,7 @@ npm install
 npm run dev          # floor :20200 + vite :5180, open http://localhost:5180
 ```
 
-You do not need a gateway to work on the UI — with none reachable the floor runs a ghost
+You do not need a provider key to work on the UI — with none reachable the floor runs a ghost
 shift and every output is stamped `GHOST OUTPUT`.
 
 Before pushing:
@@ -49,17 +49,17 @@ Change a sprite, re-run `npm run shots`, **look at the PNG**. Do not guess.
 These are the reason the thing is trustworthy, and a PR that breaks either will be sent
 back:
 
-1. **Unpriced is not free.** A bare OmniRoute reports no pricing for providers it has no
-   credentials for. Those models are tagged `no price`, never `free`. Only a known price
-   (or a real `x-omniroute-response-cost` header) may move the payroll figure.
+1. **Unpriced is not free.** Most providers report no pricing for their models.
+   Those models are tagged `no price`, never `free`. Only a known price
+   may move the payroll figure.
 2. **Nothing is invented behind the user's back.** A model that is listed but refuses to
    serve gets retried once on `auto` and the result is stamped `fell back from <model>` —
-   never silently swapped. With no gateway at all, output is marked `GHOST` and flagged
+   never silently swapped. With no provider answering at all, output is marked `GHOST` and flagged
    `ghost: true` in the API.
 
 ## Scope
 
-Things that fit: more of the floor (props, events, panels), gateway compatibility with other
+Things that fit: more of the floor (props, events, panels), provider presets for other
 OpenAI-compatible routers, better batching and pipelines, accessibility of the non-canvas UI.
 
 Things that do not: a hosted/multi-tenant version, telemetry, a component library, and any

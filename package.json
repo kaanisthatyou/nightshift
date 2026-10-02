@@ -5,11 +5,12 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "A pixel office where cheap models work the night shift and you are the boss — delegate to any model behind an OmniRoute gateway, or point the floor at a folder and watch the desks actually build it.",
+  "description": "A pixel office where free and cheap models work the night shift and you are the boss — it talks to NVIDIA NIM, Groq, Gemini, OpenRouter and any OpenAI-compatible server directly, pools every key's quota, and splits real builds across as many desks as your office has.",
   "keywords": [
     "llm",
     "agents",
-    "omniroute",
+    "nvidia-nim",
+    "groq",
     "openai-compatible",
     "gateway",
     "orchestration",
