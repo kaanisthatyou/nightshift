@@ -2,7 +2,7 @@
 
 What changed for someone running the floor. The commits say why.
 
-## 0.5.0 — unreleased
+## 0.5.0 — 2026-10-02
 
 The floor stops needing a gateway, outgrows eight desks, and builds in waves.
 
