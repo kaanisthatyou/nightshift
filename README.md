@@ -286,7 +286,8 @@ answers — one `index.html`, three hours later. The floor is built so that does
    prompt that doubles is a desk that halves.
 
 **Planning is the slow part on a slow provider.** The plan and its contract are one long reply;
-GLM on NIM took seven to eleven minutes in testing, for a contract of about 7,000 characters.
+GLM on NIM took seven to eleven minutes in testing, for a contract of about 7,000 characters —
+[the benchmark](docs/benchmark.md) has the numbers, and what eight free desks built with them.
 **mains ▸ house rules ▸ planner** can sit on a faster model than the desks — Groq's
 `gpt-oss-120b` drafted a plan in four seconds, but with a contract a third the size, and the
 contract is what every desk builds to. Every desk still works on its own model either way.
