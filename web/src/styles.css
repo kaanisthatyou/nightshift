@@ -446,7 +446,31 @@ canvas.floor {
 .ms-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .ms-blurb { display: block; color: var(--dim); font-size: 10px; margin-top: 1px; }
 
-/* ---- the router: which combo the gateway is spreading requests across ---- */
+/* ---- providers: one lane per key ---- */
+.prov { border: 1px solid var(--line); padding: 5px 6px; margin-bottom: 6px; background: #0a0d15; }
+.prov.off { opacity: 0.55; }
+.prov .row { gap: 6px; }
+.prov .bulb { flex: none; }
+.prov-edit { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.prov-edit .k { font-size: 10px; color: var(--dim); }
+.bad-text { color: var(--red); }
+.lane { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--dim); margin-top: 3px; }
+.lane-id { width: 58px; font-variant-numeric: tabular-nums; }
+.lane-slots { display: flex; gap: 2px; }
+.lane-slots i { width: 7px; height: 7px; border: 1px solid var(--line); background: #0b0e16; }
+.lane-slots i.on { background: var(--cyan); border-color: #2e6f88; }
+.lane-rpm { flex: 1; height: 4px; background: #0b0e16; border: 1px solid var(--line); overflow: hidden; }
+.lane-rpm b { display: block; height: 100%; background: var(--green); }
+.lane-v { width: 58px; text-align: right; font-variant-numeric: tabular-nums; }
+.lane.busy .lane-id { color: var(--cyan); }
+.lane.resting .lane-id, .lane.resting .lane-v { color: var(--amber); }
+.lane.resting .lane-rpm b { background: var(--amber); }
+.rail textarea.keys { width: 100%; resize: vertical; margin: 6px 0 4px; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+.route { border-left: 2px solid var(--line); padding-left: 6px; margin-bottom: 8px; }
+.route-step { font-size: 11px; gap: 4px; }
+.seg { display: flex; gap: 3px; flex-wrap: wrap; }
+
+/* ---- (legacy) combo rows ---- */
 .combo-row {
   display: flex;
   align-items: center;

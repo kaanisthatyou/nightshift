@@ -52,11 +52,11 @@ function blankState(): FloorState {
     mcp: [],
     gateway: {
       online: false,
-      baseUrl: "http://localhost:20128/v1",
-      hasKey: false,
       modelCount: 0,
       lastCheck: 0,
       error: null,
+      providers: [],
+      routes: [],
     },
     ledger: {
       costUsd: 0, tokensIn: 0, tokensOut: 0,
@@ -65,8 +65,9 @@ function blankState(): FloorState {
     settings: {
       autoAssign: true,
       ghostMode: true,
-      // the whole floor at once: eight desks, eight jobs in flight
-      maxParallel: DESK_COUNT,
+      // the whole floor at once: every desk may have a job in flight - the router
+      // is what keeps that inside each provider's limits, not this number
+      maxParallel: 32,
       defaultModel: "auto",
       plannerModel: "auto",
       mcpEnabled: true,
@@ -79,6 +80,7 @@ function blankState(): FloorState {
       shellExtra: [],
       repairRounds: 2,
       routerFallback: true,
+      reasoning: "low",
     },
   };
 }
@@ -100,7 +102,8 @@ class Store extends EventEmitter {
           ...base,
           ...raw,
           plans: Array.isArray(raw.plans) ? raw.plans : [],
-          gateway: { ...base.gateway, ...(raw.gateway ?? {}) },
+          // the gateway picture is live state, rebuilt from the router on boot
+          gateway: base.gateway,
           settings: { ...base.settings, ...(raw.settings ?? {}) },
         };
         // nobody survives a restart mid-task
@@ -130,7 +133,15 @@ class Store extends EventEmitter {
         // floors written before the rate-limit handling was in place were held at
         // four in flight because a burst was expensive to recover from. It is not
         // any more, so a floor still sitting on that old ceiling is opened up.
-        if (raw?.settings?.maxParallel === 4) this.state.settings.maxParallel = DESK_COUNT;
+        if (raw?.settings?.maxParallel === 4 || raw?.settings?.maxParallel === 8) this.state.settings.maxParallel = 32;
+        // models written as gateway ids (`auto/best-free`, `oc/...`) meant nothing
+        // without the gateway - the auto route is the honest replacement
+        for (const w of this.state.workers) {
+          if (/^(auto\/|oc\/|kiro\/|opencode)/.test(w.model)) w.model = "auto";
+        }
+        for (const key of ["defaultModel", "plannerModel"] as const) {
+          if (/^(auto\/|oc\/|kiro\/|opencode)/.test(this.state.settings[key])) this.state.settings[key] = "auto";
+        }
         // a shift that ended hours ago is over - the clock starts at 22:00 again
         if (Date.now() - this.state.ledger.shiftStartedAt > 6 * 60 * 60 * 1000) {
           this.state.ledger.shiftStartedAt = Date.now();

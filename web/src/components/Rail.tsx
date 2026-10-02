@@ -4,8 +4,8 @@ import { post, useFloor, type Tab } from "../store.ts";
 import Arena from "./Arena.tsx";
 import Crew from "./Crew.tsx";
 import Plans from "./Plans.tsx";
-import ModelSelect from "./ModelSelect.tsx";
-import type { ModelInfo, Task } from "../../../shared/types.ts";
+import Mains from "./Mains.tsx";
+import type { Task } from "../../../shared/types.ts";
 
 const fmtCost = (c: number) => (c === 0 ? "$0" : c < 0.001 ? `$${c.toFixed(6)}` : `$${c.toFixed(4)}`);
 const fmtMs = (ms: number) => (ms > 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
@@ -39,7 +39,7 @@ function TaskRow({ t }: { t: Task }) {
         {t.model && <span className="chip ell" style={{ maxWidth: 150 }}>{t.model.split("/").pop()}</span>}
         {t.ghost && <span className="chip ghost">ghost</span>}
         {t.fallbackFrom && (
-          <span className="chip bad" title={`${t.fallbackFrom} was not served, omniroute routed it instead`}>
+          <span className="chip bad" title={`${t.fallbackFrom} had no free key, the auto route served it`}>
             fell back from {t.fallbackFrom.split("/").pop()}
           </span>
         )}
@@ -330,221 +330,6 @@ function Wire() {
   );
 }
 
-/**
- * The router. One combo is live at a time on the gateway, and every desk sitting
- * on `auto` goes through it - which is how eight desks share one provider's
- * per-minute quota instead of eight of them racing into the same ceiling.
- */
-function ComboPanel() {
-  const state = useFloor((s) => s.state);
-  const [busy, setBusy] = useState<string | null>(null);
-  const combos = state?.gateway.combos ?? [];
-  const active = state?.gateway.activeCombo ?? null;
-  // null means the gateway never answered /api/combos - i.e. it is not an
-  // omniroute. An empty array means it is, and you have not made one yet.
-  const unreadable = state?.gateway.combos == null;
-
-  // the panel stays on the wall even with nothing on it, or "where is the combo
-  // support" is a fair question with no answer on screen
-  if (!state?.gateway.online) return null;
-
-  async function use(name: string) {
-    setBusy(name);
-    try {
-      await post("/combos/use", { name });
-    } catch (err: any) {
-      alert(err.message);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  return (
-    <div className="file">
-      <div className="form-title">
-        the router{" "}
-        <span className="form-no">
-          {combos.length ? (active ? `live: ${active}` : "nothing live") : unreadable ? "no combo api" : "none yet"}
-        </span>
-      </div>
-      <div className="hint" style={{ marginBottom: 6 }}>
-        a combo spreads requests across a pool of models. desks on <kbd>auto</kbd> route through whichever is
-        live here - that is what keeps eight desks under one provider's per-minute limit.
-      </div>
-
-      {!combos.length && (
-        <div className="hint" style={{ marginBottom: 6 }}>
-          {unreadable ? (
-            <>
-              this gateway does not answer <kbd>/api/combos</kbd>, so it is not an omniroute - or it wants the
-              api key you have not given it. the <b>routers</b> group in every model dropdown still works.
-            </>
-          ) : (
-            <>
-              omniroute has no combo saved yet. make one that spreads the floor across providers:
-              <br />
-              <kbd>omniroute combo create nim-spread --strategy round-robin</kbd>
-              <br />
-              then add targets in its dashboard. until then, put desks on <kbd>auto/offline</kbd> - it picks
-              whoever has the most rate-limit headroom left.
-            </>
-          )}
-        </div>
-      )}
-
-      {combos.map((c) => (
-        <div className={`combo-row ${c.active ? "on" : ""}`} key={c.id}>
-          <span className="ell grow" title={`${c.name} · ${c.strategy}`}>
-            {c.name}
-          </span>
-          <span className="combo-strat">{c.strategy}</span>
-          {c.targets != null && <span className="sub">{c.targets}</span>}
-          <button
-            className={`btn mini ${c.active ? "" : "primary"}`}
-            disabled={busy != null || c.active || !c.enabled}
-            onClick={() => void use(c.name)}
-          >
-            {c.active ? "live" : busy === c.name ? "..." : c.enabled ? "use" : "off"}
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function GatewayPanel() {
-  const state = useFloor((s) => s.state);
-  const models = useFloor((s) => s.models);
-  const [url, setUrl] = useState(state?.gateway.baseUrl ?? "http://localhost:20128/v1");
-  const [key, setKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [q, setQ] = useState("");
-  const g = state?.gateway;
-
-  async function connectGw() {
-    setBusy(true);
-    try {
-      await post("/gateway", { baseUrl: url, apiKey: key });
-    } catch (err: any) {
-      alert(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const filtered = models.filter((m) => m.id.toLowerCase().includes(q.toLowerCase())).slice(0, 60);
-
-  return (
-    <>
-      <div className="file mains">
-        <div className="form-title">
-          omniroute mains
-          <span className={`bulb ${g?.online ? "on" : ""}`} />
-        </div>
-        <div className="gauge">
-          <span className="k">line</span>
-          <span className="wireline">
-            <i className={g?.online ? "live" : ""} />
-          </span>
-          <span className="v">{g?.online ? "carrying" : "dead"}</span>
-        </div>
-        <div className="hint" style={{ marginBottom: 6 }}>
-          not running yet? <kbd>npm i -g omniroute</kbd> then <kbd>omniroute</kbd>. the key lives in its dashboard
-          under endpoints.
-        </div>
-        <input style={{ width: "100%", marginBottom: 4 }} value={url} onChange={(e) => setUrl(e.target.value)} />
-        <input
-          style={{ width: "100%", marginBottom: 6 }}
-          placeholder={g?.hasKey ? "api key set · type to replace" : "api key (blank works for free pools)"}
-          value={key}
-          type="password"
-          onChange={(e) => setKey(e.target.value)}
-        />
-        <div className="row">
-          <span className="sub grow ell">{g?.error ? g.error : `${g?.modelCount ?? 0} models`}</span>
-          <button className="btn mini primary" disabled={busy} onClick={() => void connectGw()}>
-            {busy ? "knocking..." : "connect"}
-          </button>
-        </div>
-      </div>
-
-      <ComboPanel />
-
-      <div className="file">
-        <div className="form-title">house rules</div>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={state?.settings.autoAssign ?? true}
-            onChange={(e) => void post("/settings", { autoAssign: e.target.checked })}
-          />
-          <i />
-          <span className="grow">auto-assign orders to whoever is free</span>
-        </label>
-        <label className="switch">
-          <input
-            type="checkbox"
-            checked={state?.settings.ghostMode ?? true}
-            onChange={(e) => void post("/settings", { ghostMode: e.target.checked })}
-          />
-          <i />
-          <span className="grow">ghost shift when the gateway is down</span>
-        </label>
-        <div className="form-line" style={{ marginTop: 8 }}>
-          <span className="k">planner</span>
-          <span className="strip grow" title="the model that drafts plans on the whiteboard - worth a smarter one than the desks">
-            <ModelSelect
-              value={state?.settings.plannerModel ?? "auto"}
-              onChange={(v) => void post("/settings", { plannerModel: v })}
-            />
-          </span>
-        </div>
-        <div className="form-line">
-          <span className="k">at once</span>
-          <span className="desk-dots grow">
-            {Array.from({ length: 8 }, (_, i) => (
-              <i
-                key={i}
-                className={i < (state?.settings.maxParallel ?? 4) ? "taken" : ""}
-                onClick={() => void post("/settings", { maxParallel: i + 1 })}
-                style={{ cursor: "pointer" }}
-              />
-            ))}
-          </span>
-          <span className="v">{state?.settings.maxParallel ?? 4}</span>
-        </div>
-      </div>
-
-      <div className="file catalog">
-        <div className="form-title">
-          the board <span className="form-no">{models.length} models</span>
-        </div>
-        <input
-          style={{ width: "100%", marginBottom: 6 }}
-          placeholder="search models"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-        />
-        {filtered.map((m: ModelInfo) => (
-          <div className="row" key={m.id} style={{ marginBottom: 3 }}>
-            <span
-              className={`chip ${m.free ? "free" : m.unpriced ? "" : "paid"}`}
-              title={m.unpriced ? "omniroute reported no price for this model" : undefined}
-            >
-              {m.free ? "free" : m.unpriced ? "no price" : `$${m.promptCost.toFixed(2)}`}
-            </span>
-            <span className="sub ell grow">{m.id}</span>
-            <button className="btn mini" onClick={() => void post("/workers", { model: m.id })}>
-              hire
-            </button>
-          </div>
-        ))}
-        {!models.length && <div className="empty">no models yet — connect the gateway.</div>}
-      </div>
-    </>
-  );
-}
-
 const TABS: { id: Tab; label: string }[] = [
   { id: "crew", label: "crew" },
   { id: "plan", label: "plan" },
@@ -581,7 +366,7 @@ export default function Rail() {
         {tab === "build" && <Build />}
         {tab === "arena" && <Arena />}
         {tab === "wire" && <Wire />}
-        {tab === "mains" && <GatewayPanel />}
+        {tab === "mains" && <Mains />}
       </div>
     </aside>
   );

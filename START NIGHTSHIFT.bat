@@ -9,17 +9,7 @@ cd /d "%~dp0"
 
 where node >nul 2>nul || goto noNode
 
-rem the floor runs without a gateway, but then every output is a ghost
-curl -s -o nul -m 3 http://localhost:20128/v1/models && goto up
-echo    [!] omniroute is not answering on :20128 - the floor will run in ghost mode
-echo        and nothing will be sent to a model. start it first with
-echo        "START OMNIROUTE.bat" in %USERPROFILE%\.omniroute
-echo.
-goto run
-
-:up
-echo    gateway: up on :20128
-echo.
+rem no gateway to start: keys go in mains > providers, or in NVIDIA_API_KEY and friends
 
 :run
 node bin\nightshift.mjs %*

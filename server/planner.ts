@@ -330,7 +330,7 @@ function ghostSteps(idea: string, presetId: string | null): PlanStep[] {
         (i > 0 ? "Build on what the previous desk sent:\n{{input}}\n\n" : "") +
         "(This step was written by the offline whiteboard, not by a model. Edit it before sending it down.)",
       roleKey: r.key,
-      note: "drafted offline - the gateway was not reachable",
+      note: "drafted offline - no provider was reachable",
       claims: [],
     }),
   );
@@ -379,11 +379,11 @@ export async function draftPlan(opts: {
   });
 
   if (!gateway.status.online) {
-    if (!store.state.settings.ghostMode) throw new Error("gateway offline and ghost mode is off");
+    if (!store.state.settings.ghostMode) throw new Error("no provider online and ghost mode is off");
     const plan = store.addPlan({
       title: opts.title || idea.split("\n")[0].slice(0, 60),
       idea,
-      summary: "drafted with the gateway down - these steps are a skeleton, not a plan",
+      summary: "drafted with no provider online - these steps are a skeleton, not a plan",
       presetId,
       steps: ghostSteps(idea, presetId),
       mode: "chain",
@@ -491,7 +491,7 @@ export async function expandStep(plan: Plan, stepId: string, count = 3): Promise
     store.state.ledger.tokensOut += res.tokensOut;
     store.state.ledger.costUsd += res.costUsd;
   } else {
-    if (!store.state.settings.ghostMode) throw new Error("gateway offline and ghost mode is off");
+    if (!store.state.settings.ghostMode) throw new Error("no provider online and ghost mode is off");
     fresh = Array.from({ length: 2 }, (_, n) =>
       blankStep({
         title: `${step.title} (${n + 1})`,

@@ -126,6 +126,8 @@ export interface Worker {
   temper: string | null;
   /** the system prompt this desk carries into every task */
   persona: string | null;
+  /** how long this desk may think before it writes; unset follows the floor setting */
+  reasoning?: import("./providers.ts").ReasoningLevel | null;
   /** desk index on the floor, 0-based */
   desk: number;
   /** deterministic seed for the pixel sprite generator */
@@ -173,11 +175,13 @@ export interface Task {
   attempts: number;
   /** times a provider said "not this minute" - a wait, not a failed attempt */
   waits?: number;
-  /** X-OmniRoute-Decision, i.e. which provider actually served it */
+  /** which key and model actually served the last round, e.g. `nim#2 z-ai/glm-5.3` */
   decision: string | null;
+  /** how many different keys or models carried this one conversation */
+  hops?: number;
   ghost: boolean;
   reviewNote: string | null;
-  /** set when the desk's own model was unavailable and the gateway's router took over */
+  /** set when the desk's own model was unavailable and the route took over */
   modelOverride: string | null;
   fallbackFrom: string | null;
   /** same prompt, several desks, one winner */
@@ -267,7 +271,10 @@ export interface Plan {
 }
 
 export interface ModelInfo {
+  /** `provider/model`, e.g. `nim/z-ai/glm-5.3` - what a desk sits on */
   id: string;
+  /** which configured provider serves it */
+  provider?: string;
   owned_by?: string;
   /** explicitly free, or priced at zero */
   free: boolean;
@@ -279,33 +286,63 @@ export interface ModelInfo {
   label: string;
 }
 
-/**
- * An OmniRoute routing combo: a pool of models it spreads requests across by a
- * strategy. One is active at a time, and `auto` routes through it - which is how
- * eight desks share one provider's rate limit instead of eight of them racing
- * into the same 40 requests a minute.
- */
-export interface ComboInfo {
+/** One key on one provider: the unit a rate limit is actually counted against. */
+export interface LaneStatus {
+  /** `nim#1` - never the key itself */
+  id: string;
+  provider: string;
+  /** requests in flight right now */
+  inflight: number;
+  /** how many it may have in flight - shrinks when the provider pushes back */
+  limit: number;
+  /** requests sent in the last minute */
+  lastMinute: number;
+  rpm: number;
+  /** epoch ms until which this key is resting after a 429; 0 when it is not */
+  coolUntil: number;
+  served: number;
+  failed: number;
+}
+
+/** A provider, as the window is allowed to see it: no keys, just their shape. */
+export interface ProviderStatus {
   id: string;
   name: string;
-  strategy: string;
+  baseUrl: string;
   enabled: boolean;
-  active: boolean;
-  /** how many models the combo routes across, when the gateway says */
-  targets: number | null;
+  keyCount: number;
+  keyless: boolean;
+  online: boolean;
+  error: string | null;
+  modelCount: number;
+  lastCheck: number;
+  rpm: number;
+  concurrency: number;
+  /** extra body fields every request to this provider carries */
+  params: Record<string, unknown>;
+  lanes: LaneStatus[];
+}
+
+/**
+ * An ordered pool of models. A desk sitting on a route gets the first model
+ * with a free key, and when that one's quota runs out mid-task the very same
+ * conversation carries on at the next - that is how several free quotas push
+ * one piece of work forward instead of each stalling on its own limit.
+ */
+export interface RouteInfo {
+  id: string;
+  name: string;
+  models: string[];
 }
 
 export interface GatewayStatus {
+  /** at least one provider answered with models */
   online: boolean;
-  baseUrl: string;
-  hasKey: boolean;
   modelCount: number;
   lastCheck: number;
   error: string | null;
-  version?: string;
-  /** null until the floor has managed to ask - an empty array means "asked, none" */
-  combos?: ComboInfo[] | null;
-  activeCombo?: string | null;
+  providers: ProviderStatus[];
+  routes: RouteInfo[];
 }
 
 export interface FloorEvent {
@@ -335,6 +372,7 @@ export interface FloorEvent {
     | "verify"       // the check that says whether the work is real
     | "mcp"          // a server came up, went down, or changed
     | "gateway"
+    | "provider"   // a key rested, a route hopped, a provider came up
     | "office"    // something happened on the floor that isn't work
     | "system";
   workerId?: string;
@@ -386,11 +424,12 @@ export interface FloorState {
     /** how many times a desk may be handed its own failing check to repair */
     repairRounds: number;
     /**
-     * When a desk's own model runs out of quota, hand the task to the gateway's
-     * router (`auto`) instead. Turn this off when the router has no pool of its
-     * own to fall back on - rerouting into an empty pool loses the task.
+     * When a desk's own model runs out of quota, carry the conversation on over
+     * the `auto` route instead of waiting it out.
      */
     routerFallback: boolean;
+    /** how long models may think before writing, unless a desk says otherwise */
+    reasoning: import("./providers.ts").ReasoningLevel;
   };
 }
 

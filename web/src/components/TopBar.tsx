@@ -32,9 +32,9 @@ export default function TopBar() {
       </span>
       <span className="stat">
         <i className={led} />
-        <b>{state?.gateway.online ? "OMNIROUTE UP" : "GATEWAY DOWN"}</b>
+        <b>{state?.gateway.online ? `${state.gateway.providers.filter((p) => p.online).length} PROVIDERS UP` : "NO PROVIDER"}</b>
       </span>
-      <span className="stat free" title="models the gateway reported no price for are counted separately - unpriced is not the same as free">
+      <span className="stat free" title="models the provider reported no price for are counted separately - unpriced is not the same as free">
         MODELS <b>{models.length}</b> / FREE <b>{freeCount}</b>
         {unpricedCount > 0 && <> / UNPRICED <b>{unpricedCount}</b></>}
       </span>
@@ -48,7 +48,7 @@ export default function TopBar() {
       <span className="stat">
         TOK <b>{((state?.ledger.tokensIn ?? 0) + (state?.ledger.tokensOut ?? 0)).toLocaleString()}</b>
       </span>
-      <span className="stat money" title="only counts models the gateway gave a price for">
+      <span className="stat money" title="only counts models a provider gave a price for">
         PAYROLL <b>${cost < 0.01 && cost > 0 ? cost.toFixed(5) : cost.toFixed(4)}</b>
       </span>
       {!connected && <span className="chip bad">SOCKET DOWN</span>}

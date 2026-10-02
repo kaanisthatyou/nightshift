@@ -1,7 +1,8 @@
 // REST surface. The window uses it, and so does Claude when it plays boss.
 import { Router } from "express";
 import { DESK_COUNT, blankStep, id, store } from "./store.ts";
-import { dispatch, gateway, wake } from "./engine.ts";
+import { dispatch, gateway, syncRouter, wake } from "./engine.ts";
+import { PROVIDER_PRESETS } from "../shared/providers.ts";
 import { BOSS_LINES, pick } from "./flavor.ts";
 import { fireHappening, happeningKinds } from "./nightlife.ts";
 import { draftPlan, expandStep, runPlan } from "./planner.ts";
@@ -29,66 +30,80 @@ api.get("/models", async (req, res) => {
   res.json({ models: gateway.models, gateway: store.state.gateway });
 });
 
-/**
- * Ask the gateway which routing combos it has and which one is live, and hang
- * the answer off the gateway status. A gateway that is not an OmniRoute has no
- * such endpoint - that leaves the list empty, which is not a failure.
- */
-export async function syncCombos(): Promise<void> {
-  if (!store.state.gateway.online) return;
-  try {
-    await gateway.combos();
-    // read it back off the gateway rather than the return value: that is where
-    // "no combo endpoint at all" is kept as null instead of an empty list
-    store.state.gateway.combos = gateway.comboList;
-    store.state.gateway.activeCombo = gateway.activeCombo;
-    store.touch();
-  } catch {
-    /* leave whatever was known before - a failed ask is not new information */
-  }
-}
+// ---- providers and routes ------------------------------------------
 
-api.get("/combos", async (_req, res) => {
-  await syncCombos();
-  res.json({ combos: store.state.gateway.combos ?? [], active: store.state.gateway.activeCombo ?? null });
+/** The floor's own switchboard: which providers, how many keys, who is resting. */
+api.get("/providers", (_req, res) => {
+  res.json({ gateway: gateway.snapshot(), presets: PROVIDER_PRESETS, models: gateway.models });
 });
 
-/**
- * Switch the live combo. It is one setting on the gateway, not a per-desk one:
- * every desk sitting on `auto` starts routing through whatever this names.
- */
-api.post("/combos/use", async (req, res) => {
-  const name = String(req.body?.name ?? "").trim();
-  if (!name) return res.status(400).json({ error: "name required" });
-  try {
-    await gateway.useCombo(name);
-    await syncCombos();
-    store.emitEvent({
-      type: "gateway",
-      text: `router: ${name}`,
-      data: { activeCombo: name },
-    });
-    res.json({ combos: store.state.gateway.combos ?? [], active: store.state.gateway.activeCombo ?? null });
-  } catch (err: any) {
-    res.status(502).json({ error: err?.message ?? String(err) });
-  }
-});
-
-api.post("/gateway", async (req, res) => {
-  const { baseUrl, apiKey } = req.body ?? {};
-  gateway.setConfig({
-    ...(typeof baseUrl === "string" && baseUrl ? { baseUrl } : {}),
-    ...(typeof apiKey === "string" ? { apiKey } : {}),
-  });
+async function afterProviderChange(text: string) {
   store.state.gateway = await gateway.refresh();
-  void syncCombos();
   store.emitEvent({
-    type: "gateway",
-    text: store.state.gateway.online ? "gateway reconnected" : `gateway refused: ${store.state.gateway.error}`,
-    data: { online: store.state.gateway.online },
+    type: "provider",
+    text,
+    data: { online: store.state.gateway.online, models: store.state.gateway.modelCount },
   });
   store.touch();
+}
+
+/**
+ * Add or edit a provider. `key` appends one key, `keys` replaces the list, and
+ * neither is ever sent back. A preset id (`nim`, `groq`, `gemini`...) fills in
+ * the base URL and limits; anything else needs a `baseUrl`.
+ */
+api.post("/providers", async (req, res) => {
+  try {
+    const p = gateway.upsertProvider(req.body ?? {});
+    const keys = gateway.snapshot().providers.find((x) => x.id === p.id)?.keyCount ?? 0;
+    await afterProviderChange(`provider ${p.id}: ${keys} keys`);
+    res.json({ gateway: store.state.gateway, models: gateway.models });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message ?? String(err) });
+  }
+});
+
+/** Paste a pile of keys, one per line. Which provider each belongs to is read off its prefix. */
+api.post("/providers/keys", async (req, res) => {
+  const text = String(req.body?.text ?? req.body?.keys ?? "");
+  if (!text.trim()) return res.status(400).json({ error: "text required - one key per line" });
+  const result = gateway.importKeys(text);
+  gateway.save();
+  const said = result.added.map((a) => `${a.provider} x${a.count}`).join(", ") || "none";
+  await afterProviderChange(`keys added: ${said}`);
+  res.json({ ...result, gateway: store.state.gateway, models: gateway.models });
+});
+
+api.delete("/providers/:id", async (req, res) => {
+  const ok = gateway.removeProvider(req.params.id);
+  if (ok) await afterProviderChange(`provider ${req.params.id} removed`);
+  res.status(ok ? 200 : 404).json({ ok, gateway: store.state.gateway });
+});
+
+api.post("/providers/refresh", async (_req, res) => {
+  store.state.gateway = await gateway.refresh();
+  store.touch();
   res.json({ gateway: store.state.gateway, models: gateway.models });
+});
+
+/**
+ * A route is an ordered pool of models. A desk on `route:<id>` - or on `auto`,
+ * which is the route with that id - is served by the first one with a free key,
+ * and its conversation moves down the list when a quota runs out.
+ */
+api.post("/routes", (req, res) => {
+  const b = req.body ?? {};
+  if (!b.id && !b.name) return res.status(400).json({ error: "id or name required" });
+  const route = gateway.setRoute(b);
+  syncRouter();
+  store.emitEvent({ type: "provider", text: `route ${route.id}: ${route.models.join(" > ") || "(every provider)"}` });
+  res.json({ route, gateway: store.state.gateway });
+});
+
+api.delete("/routes/:id", (req, res) => {
+  const ok = gateway.removeRoute(req.params.id);
+  syncRouter();
+  res.status(ok ? 200 : 404).json({ ok, gateway: store.state.gateway });
 });
 
 api.post("/settings", (req, res) => {
@@ -96,7 +111,8 @@ api.post("/settings", (req, res) => {
   const b = req.body ?? {};
   if (typeof b.autoAssign === "boolean") s.autoAssign = b.autoAssign;
   if (typeof b.ghostMode === "boolean") s.ghostMode = b.ghostMode;
-  if (typeof b.maxParallel === "number") s.maxParallel = Math.max(1, Math.min(8, b.maxParallel));
+  if (typeof b.maxParallel === "number") s.maxParallel = Math.max(1, Math.min(64, b.maxParallel));
+  if (["default", "off", "low", "medium", "high"].includes(b.reasoning)) s.reasoning = b.reasoning;
   if (typeof b.defaultModel === "string" && b.defaultModel) s.defaultModel = b.defaultModel;
   if (typeof b.plannerModel === "string" && b.plannerModel) s.plannerModel = b.plannerModel;
   if (typeof b.mcpEnabled === "boolean") s.mcpEnabled = b.mcpEnabled;
@@ -105,6 +121,7 @@ api.post("/settings", (req, res) => {
   if (typeof b.shellEnabled === "boolean") s.shellEnabled = b.shellEnabled;
   if (typeof b.repairRounds === "number") s.repairRounds = Math.max(0, Math.min(6, b.repairRounds));
   if (typeof b.routerFallback === "boolean") s.routerFallback = b.routerFallback;
+  syncRouter();
   if (Array.isArray(b.shellExtra)) {
     s.shellExtra = b.shellExtra.map((x: any) => String(x).trim().toLowerCase()).filter(Boolean).slice(0, 40);
   }
@@ -151,6 +168,8 @@ api.patch("/workers/:id", (req, res) => {
   if (typeof b.name === "string" && b.name) w.name = b.name;
   if (typeof b.title === "string") w.title = b.title;
   if (b.state === "asleep" || b.state === "idle") w.state = b.state;
+  if (["default", "off", "low", "medium", "high"].includes(b.reasoning)) w.reasoning = b.reasoning;
+  if (b.reasoning === null) w.reasoning = null;
   if (Array.isArray(b.mcpIds)) {
     // accept handles as well as ids, so the skill can say "Roblox_Studio"
     w.mcpIds = b.mcpIds

@@ -23,7 +23,7 @@ export default function TaskModal() {
           {t.decision && <span className="chip">via {t.decision}</span>}
           {t.ghost && <span className="chip ghost">ghost output · nothing was sent to a model</span>}
           {t.fallbackFrom && (
-            <span className="chip bad">{t.fallbackFrom} was not served · omniroute routed this one</span>
+            <span className="chip bad">{t.fallbackFrom} had no free key · the auto route served this one</span>
           )}
           <span className="chip">{t.tokensIn} in / {t.tokensOut} out</span>
           {t.latencyMs > 0 && <span className="chip">{(t.latencyMs / 1000).toFixed(1)}s</span>}

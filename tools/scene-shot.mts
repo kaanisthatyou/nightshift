@@ -44,7 +44,7 @@ scene.sync({
   workers,
   tasks: Array.from({ length: 4 }, (_, i) => ({ id: `t${i}`, stage: "review" })),
   jobs: [],
-  gateway: { online: true, baseUrl: "", hasKey: false, modelCount: 0, lastCheck: 0, error: null },
+  gateway: { online: true, modelCount: 0, lastCheck: 0, error: null, providers: [], routes: [] },
   ledger: { costUsd: 0, tokensIn: 0, tokensOut: 0, tasksDone: 0, tasksFailed: 0, shiftStartedAt: 0 },
   settings: { autoAssign: true, ghostMode: false, maxParallel: 4, defaultModel: "auto" },
 } as never);
@@ -76,7 +76,7 @@ function closeUp(file: string, wx: number, wy: number, ww: number, wh: number, z
   };
   p.sync({
     workers, tasks: [{ id: "t", stage: "review" }], jobs: [],
-    gateway: { online: true, baseUrl: "", hasKey: false, modelCount: 0, lastCheck: 0, error: null },
+    gateway: { online: true, modelCount: 0, lastCheck: 0, error: null, providers: [], routes: [] },
     ledger: { costUsd: 0, tokensIn: 0, tokensOut: 0, tasksDone: 0, tasksFailed: 0, shiftStartedAt: 0 },
     settings: { autoAssign: true, ghostMode: false, maxParallel: 4, defaultModel: "auto" },
   });

@@ -6,7 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
-import { api, syncCombos } from "./routes.ts";
+import { api } from "./routes.ts";
 import { store } from "./store.ts";
 import { gateway, startEngine } from "./engine.ts";
 import { mcp } from "./mcp.ts";
@@ -17,6 +17,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 20200);
 
 store.load();
+gateway.load();
+gateway.reasoning = store.state.settings.reasoning ?? "low";
+gateway.fallback = store.state.settings.routerFallback !== false;
 mcp.load();
 
 const app = express();
@@ -81,20 +84,16 @@ store.on("event", (event: FloorEvent) => broadcast({ type: "event", event }));
 server.listen(PORT, async () => {
   console.log(`\n  NIGHTSHIFT floor listening on http://localhost:${PORT}`);
   store.state.gateway = await gateway.refresh();
-  if (store.state.gateway.online) {
-    console.log(`  gateway: ${gateway.config.baseUrl} - ${gateway.models.length} models (${gateway.models.filter((m) => m.free).length} free)`);
-    broadcast({ type: "models", models: gateway.models });
-    // combos are an omniroute extra: ask once, quietly, and carry on without them
-    void syncCombos().then(() => {
-      const combos = store.state.gateway.combos ?? [];
-      if (combos.length) {
-        const live = store.state.gateway.activeCombo;
-        console.log(`  router: ${combos.length} combos${live ? `, live: ${live}` : ", none live"}`);
-      }
-    });
-  } else {
-    console.log(`  gateway: offline (${store.state.gateway.error}) - running in ghost mode`);
+  const g = store.state.gateway;
+  if (!g.providers.length) {
+    console.log("  providers: none yet - paste an API key in the providers panel, or start with NVIDIA_API_KEY=... set");
   }
+  for (const p of g.providers) {
+    const keys = p.keyless ? "local" : `${p.keyCount} key${p.keyCount === 1 ? "" : "s"}`;
+    console.log(`  ${p.online ? "up  " : "down"} ${p.id.padEnd(11)} ${keys.padEnd(8)} ${p.modelCount} models${p.error ? ` - ${p.error}` : ""}`);
+  }
+  if (g.online) broadcast({ type: "models", models: gateway.models });
+  else console.log("  no provider answering - running in ghost mode");
   store.touch();
   startEngine();
   startNightLife();

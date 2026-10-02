@@ -1,5 +1,5 @@
 // The shift itself: who works on what, when, and what it costs.
-import { Gateway, RateLimited } from "./omniroute.ts";
+import { ModelRouter, RateLimited } from "./router.ts";
 import { asOpenAiTools, mcp } from "./mcp.ts";
 import { NATIVE_NAMES, asOpenAiNative, nativeTools, runNative, shell, verify } from "./workspace.ts";
 import { store } from "./store.ts";
@@ -7,13 +7,15 @@ import {
   ACCEPT_LINES, COFFEE_LINE, DONE_LINES, FAIL_LINES, GHOST_NOTE, IDLE_LINES, fallbackLine, pick,
 } from "./flavor.ts";
 import { HOUSE_RULES } from "../shared/presets.ts";
-import type { ChatResult } from "./omniroute.ts";
+import type { ChatResult } from "./router.ts";
 import type { Plan, Task, ToolCall, Worker } from "../shared/types.ts";
 
-export const gateway = new Gateway({
-  baseUrl: process.env.OMNIROUTE_URL || "http://localhost:20128/v1",
-  apiKey: process.env.OMNIROUTE_KEY || "",
-});
+/**
+ * Every model the floor can reach, behind one object. It is still called the
+ * gateway in the rest of the code because that is the job it does - but there is
+ * no gateway process any more: the floor talks to each provider itself.
+ */
+export const gateway = new ModelRouter();
 
 /**
  * Tasks the boss just walked over to: hold them until the walk animation lands.
@@ -23,7 +25,7 @@ const holdUntil = new Map<string, number>();
 export const THEATRE_MS = 2200;
 
 /** After this many waits in a row it is not a busy minute, it is a wall. */
-const RATE_WAIT_LIMIT = 4;
+const RATE_WAIT_LIMIT = 6;
 
 const running = new Set<string>();
 
@@ -152,12 +154,14 @@ async function converse(
     ? Math.max(6, store.state.settings.buildMaxRounds || 28)
     : Math.max(1, store.state.settings.mcpMaxRounds || 6);
   let repairsLeft = build && t.verify ? Math.max(0, store.state.settings.repairRounds ?? 2) : 0;
+  const reasoning = w.reasoning ?? store.state.settings.reasoning ?? "low";
 
   let last: ChatResult | null = null;
   let summary = "";
   let tokensIn = 0;
   let tokensOut = 0;
   let costUsd = 0;
+  const lanes = new Set<string>();
 
   for (let round = 0; round < maxRounds; round++) {
     const left = maxRounds - round - 1;
@@ -172,14 +176,43 @@ async function converse(
       // carry the file. 4000 was enough for a stub and not for a real component,
       // and a truncated write_file lands as a broken file rather than as an error.
       maxTokens: build ? 8000 : 1600,
-      signal: AbortSignal.timeout(build ? 300_000 : 180_000),
+      reasoning,
+      // a provider that buffers a whole tool call sends nothing until it is done;
+      // a 10k-token file at fifteen tokens a second is eleven silent minutes
+      idleMs: build ? 12 * 60_000 : 4 * 60_000,
+      signal: AbortSignal.timeout(build ? 20 * 60_000 : 8 * 60_000),
       onChunk,
+      onWait: (ms) => {
+        const secs = Math.ceil(ms / 1000);
+        if (w.state !== "coffee") {
+          store.setWorkerState(w.id, "coffee", `${secs}sn - butun anahtarlar dolu, bekliyorum`);
+          store.emitEvent({
+            type: "system", taskId: t.id, workerId: w.id,
+            text: `${model}: every key is resting - waiting ${secs}s, work kept`,
+            data: { rateLimited: true, waitMs: ms, model },
+          });
+        }
+      },
+      onHop: (from, to, why) => {
+        store.emitEvent({
+          type: "provider",
+          workerId: w.id,
+          taskId: t.id,
+          text: `${from} -> ${to}`,
+          data: { from, to, why: why.slice(0, 200) },
+        });
+      },
       ...(offerTools ? { tools: defs } : {}),
     });
     // usage is per call - the task should show what the whole conversation cost
     tokensIn += res.tokensIn;
     tokensOut += res.tokensOut;
     if (res.costUsd != null) costUsd += res.costUsd;
+    if (res.decision) {
+      lanes.add(res.decision);
+      t.decision = res.decision;
+      t.hops = lanes.size - 1;
+    }
     last = res;
 
     let finished = !res.toolCalls.length;
@@ -271,6 +304,7 @@ async function converse(
     costUsd: totalCost,
     toolCalls: [],
     finishReason: last?.finishReason ?? null,
+    hops: Math.max(0, lanes.size - 1),
   };
 }
 
@@ -412,6 +446,7 @@ async function runTask(t: Task, w: Worker) {
   t.toolCalls = [];
   t.files = [];
   t.verifyRuns = [];
+  t.hops = 0;
   t.sentPrompt = resolvePrompt(t, previousOutput(t));
   const accept = pick(ACCEPT_LINES);
   store.setStage(t.id, "running");
@@ -444,7 +479,7 @@ async function runTask(t: Task, w: Worker) {
 
   const started = Date.now();
   try {
-    let result;
+    let result: ChatResult;
     if (gateway.status.online) {
       result = await converse(
         t, w, model,
@@ -461,7 +496,7 @@ async function runTask(t: Task, w: Worker) {
       };
       t.ghost = true;
     } else {
-      throw new Error("gateway offline and ghost mode is off");
+      throw new Error("no provider online and ghost mode is off");
     }
     flush(true);
 
@@ -474,7 +509,7 @@ async function runTask(t: Task, w: Worker) {
       ? 0
       : result.costUsd != null
         ? result.costUsd
-        : gateway.costFor(model, t.tokensIn, t.tokensOut);
+        : gateway.costFor(result.model, t.tokensIn, t.tokensOut);
     t.finishedAt = Date.now();
 
     w.stats.tasksDone += 1;
@@ -492,7 +527,7 @@ async function runTask(t: Task, w: Worker) {
     store.emitEvent({
       type: "worker.done", workerId: w.id, taskId: t.id,
       text: t.output.slice(0, 400),
-      data: { ms: t.latencyMs, tokensOut: t.tokensOut, cost: t.costUsd, ghost: t.ghost, decision: t.decision },
+      data: { ms: t.latencyMs, tokensOut: t.tokensOut, cost: t.costUsd, ghost: t.ghost, decision: t.decision, hops: t.hops },
     });
     store.nudgeMorale(w.id, +4);
     store.setStage(t.id, "review");
@@ -500,41 +535,24 @@ async function runTask(t: Task, w: Worker) {
   } catch (err: any) {
     flush(true);
     t.error = err?.message ?? String(err);
-    const missing = /model_not_found|no active credentials|not supported|invalid_api_key|40[14]/i.test(t.error ?? "");
     t.latencyMs = Date.now() - started;
     t.finishedAt = Date.now();
 
-    // A rate limit is a clock, not a failure. The desk takes a real coffee for
-    // exactly as long as the provider asked for, and the task waits with it -
-    // no retry spent, no morale lost, nothing marked failed.
+    // A rate limit is a clock, not a failure. The router already tried every
+    // other key and route; what reaches here means all of them are resting.
     if (err instanceof RateLimited && (t.waits ?? 0) < RATE_WAIT_LIMIT) {
       t.waits = (t.waits ?? 0) + 1;
       t.error = null;
       t.stage = "queued";
       holdUntil.set(t.id, Date.now() + err.waitMs);
-
-      // once is the minute window; twice is that model's quota, and the router
-      // (whatever combo omniroute has live) has other providers to spend
-      const toRouter =
-        store.state.settings.routerFallback !== false &&
-        t.waits >= 2 && !t.modelOverride && model !== "auto" && gateway.status.online;
-      if (toRouter) {
-        t.modelOverride = "auto";
-        t.fallbackFrom = model;
-      }
-
       const secs = Math.ceil(err.waitMs / 1000);
-      const line = toRouter ? `${secs}sn mola - kotam doldu, routera geciyorum` : `${secs}sn mola - kota doldu`;
+      const line = `${secs}sn mola - butun anahtarlar dolu`;
       store.setWorkerState(w.id, "coffee", line);
       store.emitEvent({ type: "worker.say", workerId: w.id, taskId: t.id, text: line });
       store.emitEvent({
-        type: "system",
-        taskId: t.id,
-        workerId: w.id,
-        text: toRouter
-          ? `${model} rate limited - ${secs}s, then the router takes it`
-          : `${model} rate limited - waiting ${secs}s`,
-        data: { rateLimited: true, waitMs: err.waitMs, model, toRouter },
+        type: "system", taskId: t.id, workerId: w.id,
+        text: `${model}: every key is resting - waiting ${secs}s`,
+        data: { rateLimited: true, waitMs: err.waitMs, model },
       });
       // the desk comes back when the window does, not on the usual 2.6s timer
       setTimeout(() => {
@@ -548,9 +566,9 @@ async function runTask(t: Task, w: Worker) {
       return;
     }
 
-    // The catalog lists models the provider will not actually serve. Hand the job to
-    // OmniRoute's own router instead of failing - but say so, on the record.
-    if (missing && !t.modelOverride && model !== "auto" && gateway.status.online) {
+    // Nothing serves the model this desk sits on. The auto route might.
+    const unservable = /nothing serves|not served by|no provider can serve/i.test(t.error ?? "");
+    if (unservable && !t.modelOverride && model !== "auto" && store.state.settings.routerFallback !== false) {
       t.modelOverride = "auto";
       t.fallbackFrom = model;
       t.error = null;
@@ -569,7 +587,7 @@ async function runTask(t: Task, w: Worker) {
     w.stats.tasksFailed += 1;
     w.stats.streak = 0;
     store.state.ledger.tasksFailed += 1;
-    store.setWorkerState(w.id, "burnt", missing ? "o model icin bana hesap vermediler." : pick(FAIL_LINES));
+    store.setWorkerState(w.id, "burnt", unservable ? "o model icin anahtar yok." : pick(FAIL_LINES));
     store.emitEvent({ type: "worker.fail", workerId: w.id, taskId: t.id, text: t.error ?? "unknown failure" });
     store.nudgeMorale(w.id, -14);
 
@@ -789,8 +807,7 @@ export function tick() {
       if (!s.settings.autoAssign) continue;
       const free = idleWorkers().filter((x) => !claimed.has(x.id));
       if (!free.length) continue;
-      // a desk whose model the gateway doesn't serve is a dead end - skip it if we can
-      const servable = free.filter((x) => !gateway.models.length || x.model === "auto" || gateway.models.some((m) => m.id === x.model));
+      const servable = free.filter((x) => gateway.servable(x.model));
       const pool = servable.length ? servable : free;
       // whoever is least loaded takes it
       w = pool.sort((a, b) => a.stats.tasksDone - b.stats.tasksDone)[0];
@@ -815,9 +832,22 @@ export function chatter() {
   store.touch();
 }
 
+/** Push the router's live picture - who is resting, who is busy - into the floor state. */
+export function syncRouter() {
+  gateway.reasoning = store.state.settings.reasoning ?? "low";
+  gateway.fallback = store.state.settings.routerFallback !== false;
+  const before = store.state.gateway;
+  const next = gateway.snapshot();
+  const busy = next.providers.some((p) => p.lanes.some((l) => l.inflight || l.coolUntil));
+  const was = before?.providers?.some((p) => p.lanes.some((l) => l.inflight || l.coolUntil));
+  store.state.gateway = next;
+  if (busy || was) store.touch();
+}
+
 export function startEngine() {
   setInterval(tick, 500);
   setInterval(chatter, 24_000);
+  setInterval(syncRouter, 2_500);
   setInterval(async () => {
     const before = gateway.status.online;
     const st = await gateway.refresh();
@@ -825,10 +855,10 @@ export function startEngine() {
     if (st.online !== before) {
       store.emitEvent({
         type: "gateway",
-        text: st.online ? `gateway up - ${st.modelCount} models on the board` : `gateway down - ${st.error ?? "no answer"}`,
+        text: st.online ? `providers up - ${st.modelCount} models on the board` : `no provider answering - ${st.error ?? ""}`,
         data: { online: st.online },
       });
     }
     store.touch();
-  }, 15_000);
+  }, 120_000);
 }

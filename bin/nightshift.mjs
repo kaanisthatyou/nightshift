@@ -6,7 +6,8 @@
 //   npx @kaandrick/nightshift --port 8080
 //   npx @kaandrick/nightshift@latest     the newest one, past the npx cache
 //
-// It never installs OmniRoute for you and never pretends a gateway is up.
+// There is no gateway to start: the floor calls providers itself. Give it a key
+// in the window, or through NVIDIA_API_KEY / GROQ_API_KEY / GEMINI_API_KEY.
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -31,7 +32,6 @@ if (flag("--help") || flag("-h")) {
     nightshift                start the floor and open the window
     nightshift --no-open      don't open a browser
     nightshift --port <n>     serve on another port (default 20200)
-    nightshift --gateway <u>  OmniRoute base URL (default http://localhost:20128/v1)
     nightshift --no-build     skip the build check
     nightshift --update       install the newest version from npm
     nightshift --version      print the version and leave
@@ -132,26 +132,7 @@ async function startFloor() {
     npm("run build");
   }
 
-  const gatewayUrl = value("--gateway", process.env.OMNIROUTE_URL || "http://localhost:20128/v1");
-
-  // two network calls on a short leash, so they run side by side
-  const [probe, latest] = await Promise.all([
-    fetch(`${gatewayUrl.replace(/\/$/, "")}/models`, {
-      headers: process.env.OMNIROUTE_KEY ? { authorization: `Bearer ${process.env.OMNIROUTE_KEY}` } : {},
-      signal: AbortSignal.timeout(4000),
-    }).catch(() => null),
-    latestVersion(),
-  ]);
-
-  if (probe?.ok) {
-    const body = await probe.json().catch(() => null);
-    const n = Array.isArray(body?.data) ? body.data.length : 0;
-    say(`gateway up at ${gatewayUrl}${n ? ` — ${n} models` : ""}`);
-  } else {
-    say(`no gateway at ${gatewayUrl}.`);
-    say(`the floor still runs, but every output is marked GHOST — nothing reaches a model.`);
-    say(`start one with:  npm install -g omniroute && omniroute`);
-  }
+  const latest = await latestVersion();
 
   if (latest && isNewer(latest, pkg.version)) {
     say(`update: ${pkg.version} -> ${latest}  —  npx ${pkg.name}@latest  (or nightshift --update)`);
@@ -163,7 +144,7 @@ async function startFloor() {
   const child = spawn(process.execPath, [require.resolve("tsx/cli"), path.join(root, "server", "index.ts")], {
     cwd: root,
     stdio: "inherit",
-    env: { ...process.env, NODE_ENV: "production", PORT: String(port), OMNIROUTE_URL: gatewayUrl },
+    env: { ...process.env, NODE_ENV: "production", PORT: String(port) },
   });
 
   const stop = () => {

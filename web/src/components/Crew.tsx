@@ -90,7 +90,7 @@ function WorkerCard({ w }: { w: Worker }) {
       )}
 
       {unknownModel && (
-        <div className="warn" title="the gateway does not list this model - it will fail until you pick another or add credentials in omniroute">
+        <div className="warn" title="no configured provider lists this model - it will fall back to auto, or fail if there is no key for it">
           ! not on the board
         </div>
       )}

@@ -1,25 +1,23 @@
-# Provider API keys, one per line, for `npm run keys`.
+# Provider API keys, one per line, for `npm run keys` - or paste the same lines
+# into mains > providers in the window.
 #
-# This file is only read by tools/import-keys.mjs, which pushes the keys into a
-# running OmniRoute. NIGHTSHIFT itself never stores a provider key — it only
-# talks to the gateway.
+# The floor talks to each provider directly. Keys are kept in
+# ~/.nightshift/providers.json and never sent to the browser. A file at
+# ~/.nightshift/keys.txt is also read on every boot.
 #
-# Default location: ~/.omniroute/keys.txt
-# Or pass a path:   npm run keys -- ./my-keys.txt
+# Every key is its own lane with its own rate limit: three NVIDIA keys are three
+# times the requests a minute, and a desk's work moves to whichever key is free.
 #
-# Never commit a real one. `keys.txt` and `*.keys.txt` are gitignored.
-#
-# Whatever separator you naturally type works: `=`, `:`, tab, or a single space.
-# `#` and `//` start a comment.
+# A bare key is matched to its provider by prefix:
+nvapi-xxxxxxxxxxxxxxxxxxxxxxxx
+gsk_xxxxxxxxxxxxxxxxxxxxxxxx
+AIzaxxxxxxxxxxxxxxxxxxxxxxxx
 
-openai = sk-proj-xxxxxxxxxxxxxxxxxxxxxxxx
-groq: gsk_xxxxxxxxxxxxxxxxxxxxxxxx
-mistral  xxxxxxxxxxxxxxxxxxxxxxxx
+# Or name the provider (nim, groq, gemini, openrouter, cerebras, mistral, deepseek, openai):
+mistral = xxxxxxxxxxxxxxxxxxxxxxxx
 
-# Optional extras after a `|`: a label, and a base URL to override the one
-# OmniRoute has on file for that provider.
-openrouter = sk-or-v1-xxxxxxxx | personal account
-some-selfhosted = key-xxxx | lab box | http://192.168.1.40:8000/v1
+# Any other OpenAI-compatible server: a new id, the key, and its base URL after a `|`
+lab-box = key-xxxx | http://192.168.1.40:8000/v1
 
-# Dry run first if you want to check the parsing without sending anything:
-#   npm run keys -- --dry-run
+# Or skip the file entirely and start with environment variables:
+#   NVIDIA_API_KEY=nvapi-...  GROQ_API_KEY=gsk_...  GEMINI_API_KEY=AIza...  npm start

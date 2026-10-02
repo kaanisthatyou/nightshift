@@ -9,22 +9,25 @@ import { useFloor } from "../store.ts";
 import type { ModelInfo } from "../../../shared/types.ts";
 
 const AUTO = "auto";
+const NO_ROUTES: import("../../../shared/types.ts").RouteInfo[] = [];
 type Tier = "all" | "free" | "unpriced" | "paid";
 
 /**
- * OmniRoute's virtual combos. They are not models and never show up in the
- * catalog, but a desk can sit on one and let the gateway spread its requests -
- * `auto/offline` in particular picks whoever has the most rate-limit headroom
- * left, which is what stops eight desks hammering one provider's quota.
+ * Routes are not models: each is an ordered pool the floor's router serves from,
+ * moving a desk's conversation down the list when a quota runs out. `auto` is
+ * the route every desk falls back on.
  */
-const ROUTERS: { id: string; blurb: string }[] = [
-  { id: "auto", blurb: "balanced · sticks to the last good provider" },
-  { id: "auto/offline", blurb: "most quota and rate-limit headroom first" },
-  { id: "auto/cheap", blurb: "cheapest per token first" },
-  { id: "auto/fast", blurb: "lowest latency first" },
-  { id: "auto/coding", blurb: "quality-first weights for code" },
-  { id: "auto/smart", blurb: "quality-first, explores for better ones" },
-];
+function useRouters(): { id: string; blurb: string }[] {
+  const routes = useFloor((s) => s.state?.gateway.routes) ?? NO_ROUTES;
+  return useMemo(() => {
+    const list = routes.map((r) => ({
+      id: r.id === "auto" ? "auto" : `route:${r.id}`,
+      blurb: r.models.length ? r.models.map((m) => m.split("/").pop()).join(" > ") : "every provider's best model, first free key",
+    }));
+    if (!list.some((r) => r.id === "auto")) list.unshift({ id: "auto", blurb: "every provider's best model, first free key" });
+    return list;
+  }, [routes]);
+}
 
 interface Group {
   key: string;
@@ -43,8 +46,7 @@ function priceOf(m: ModelInfo) {
 }
 
 const WHY_UNPRICED =
-  "the gateway reported no price for this model. unknown is not the same as free - " +
-  "add credentials for that provider in omniroute and the price shows up.";
+  "the provider reported no price for this model. unknown is not the same as free.";
 
 /** `nvidia/openai/gpt-oss-120b` is nvidia's, and the row only has to say the rest. */
 function providerOf(m: ModelInfo) {
@@ -102,6 +104,7 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
   const [at, setAt] = useState({ left: 0, top: 0, fromBottom: 0, width: 0, up: false });
 
   const groups = useMemo(() => group(models, query, tier), [models, query, tier]);
+  const ROUTERS = useRouters();
   // the routers are not in the catalog - they are the gateway's own combos, and
   // they stay at the top whichever tier is being looked at
   const routers = useMemo(() => {
@@ -110,7 +113,7 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
     return ROUTERS.filter((r) => !known.has(r.id)).filter(
       (r) => !terms.length || terms.every((t) => `${r.id} ${r.blurb}`.toLowerCase().includes(t)),
     );
-  }, [models, query]);
+  }, [models, query, ROUTERS]);
   // one flat list behind the groups, so the arrow keys have somewhere to go
   const flat = useMemo(
     () => [...routers.map((r) => r.id), ...groups.flatMap((g) => g.models.map((m) => m.id))],
@@ -189,7 +192,7 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
   };
 
   const current = models.find((m) => m.id === value);
-  const shown = value === AUTO ? "auto (let omniroute pick)" : value;
+  const shown = value === AUTO ? "auto (first free key)" : value;
   // where each row sits in `flat`, so a row knows whether the cursor is on it
   const slot = useMemo(() => new Map(flat.map((id, i) => [id, i])), [flat]);
 
@@ -217,7 +220,7 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKey}
-            placeholder={models.length ? `search ${models.length} models...` : "no gateway - nothing to search"}
+            placeholder={models.length ? `search ${models.length} models...` : "no provider yet - nothing to search"}
           />
 
           <div className="ms-chips">
@@ -238,8 +241,8 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
             {routers.length > 0 && (
               <div>
                 <div className="ms-head">
-                  <span className="ell">routers</span>
-                  <span className="ms-count">the gateway picks</span>
+                  <span className="ell">routes</span>
+                  <span className="ms-count">quota pools</span>
                 </div>
                 {routers.map((r) => {
                   const i = slot.get(r.id) ?? -1;
@@ -256,7 +259,7 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
                         {r.id}
                         <span className="ms-blurb">{r.blurb}</span>
                       </span>
-                      <span className="ms-tag auto">router</span>
+                      <span className="ms-tag auto">route</span>
                     </div>
                   );
                 })}
@@ -299,7 +302,7 @@ export default function ModelSelect({ value, onChange }: { value: string; onChan
             {!groups.length && (
               <div className="ms-empty">
                 {!models.length
-                  ? "connect a gateway and the board fills up"
+                  ? "add a provider key under mains and the board fills up"
                   : query
                     ? `nothing matches "${query}"`
                     : `no ${tier === "unpriced" ? "unpriced" : tier} models on the board`}
