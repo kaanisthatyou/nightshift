@@ -9,6 +9,7 @@ import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { transform } from "esbuild";
 import { store } from "./store.ts";
 import type { FileTouch, Task, VerifyResult, Worker } from "../shared/types.ts";
 
@@ -244,18 +245,39 @@ export function nativeTools(shellOn: boolean): NativeTool[] {
     },
     {
       name: "read_file",
-      description: "Read a file in the working folder. Read a file before you edit it.",
+      description:
+        "Read a file in the working folder, with line numbers. Read a file before you edit it. " +
+        "For a long file, pass from/to to read only the lines you need.",
       schema: {
         type: "object",
-        properties: { path: { type: "string", description: "path relative to the working folder" } },
+        properties: {
+          path: { type: "string", description: "path relative to the working folder" },
+          from: { type: "number", description: "first line to return, 1-based (optional)" },
+          to: { type: "number", description: "last line to return (optional)" },
+        },
         required: ["path"],
+      },
+    },
+    {
+      name: "search_files",
+      description:
+        "Find text across the project: returns matching lines as path:line: text. Use it to find where a name is " +
+        "defined or used instead of reading files one by one.",
+      schema: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "plain text to look for (case-insensitive)" },
+          dir: { type: "string", description: "limit to this subfolder (optional)" },
+        },
+        required: ["query"],
       },
     },
     {
       name: "write_file",
       description:
         "Create a file, or replace one completely, with the content you give. This is how you actually deliver code - " +
-        "code printed in your reply is thrown away, only files written with this tool exist.",
+        "code printed in your reply is thrown away, only files written with this tool exist. You may call it several " +
+        "times in one reply to write several files at once. The result tells you about any syntax error it found.",
       schema: {
         type: "object",
         properties: {
@@ -285,8 +307,9 @@ export function nativeTools(shellOn: boolean): NativeTool[] {
     list.push({
       name: "run",
       description:
-        "Run a command in the working folder - install a dependency, build, run the tests. " +
-        "Only build tooling is allowed (npm, node, python, pytest, tsc, git and the like). Nothing that fetches from the network.",
+        "Run a command in the working folder and get its output: build, type-check, run the tests, install a package. " +
+        "Only build tooling is allowed (npm, npx, node, tsc, python, pytest, git and the like). Commands must exit on " +
+        "their own - dev servers and watchers (npm run dev, vite, nodemon) are refused.",
       schema: {
         type: "object",
         properties: { command: { type: "string", description: "the full command line, e.g. `npm install express`" } },
@@ -350,14 +373,27 @@ export async function runNative(
       const full = inside(root, args.path);
       if (!fs.existsSync(full)) return { ok: false, text: `${args.path} does not exist yet` };
       if (fs.statSync(full).isDirectory()) return { ok: false, text: `${args.path} is a folder - use list_files` };
-      let body = fs.readFileSync(full, "utf8");
-      const clipped = body.length > READ_CAP;
-      if (clipped) body = body.slice(0, READ_CAP);
-      const numbered = body.split("\n").map((l, i) => `${String(i + 1).padStart(4)} | ${l}`).join("\n");
-      return {
-        ok: true,
-        text: `${args.path}\n${numbered}${clipped ? "\n... [file continues, truncated]" : ""}`,
-      };
+      const all = fs.readFileSync(full, "utf8").split("\n");
+      const from = Math.max(1, Math.floor(Number(args.from) || 1));
+      const to = Math.min(all.length, Math.floor(Number(args.to) || all.length));
+      let used = 0;
+      const out: string[] = [];
+      let last = from - 1;
+      for (let i = from - 1; i < to; i++) {
+        const line = `${String(i + 1).padStart(4)} | ${all[i]}`;
+        if (used + line.length > READ_CAP) break;
+        out.push(line);
+        used += line.length + 1;
+        last = i + 1;
+      }
+      const more = last < all.length ? `\n... [${all.length - last} more lines - read_file with from=${last + 1}]` : "";
+      return { ok: true, text: `${args.path} (${all.length} lines)\n${out.join("\n")}${more}` };
+    }
+
+    case "search_files": {
+      const query = String(args.query ?? "").trim();
+      if (!query) return { ok: false, text: "query is required" };
+      return { ok: true, text: search(root, query, (args.dir as string) || ".") };
     }
 
     case "write_file": {
@@ -376,10 +412,15 @@ export async function runNative(
         ts: Date.now(),
       };
       announce(t, w, touched);
+      const problem = await syntaxCheck(rel, content);
+      const hints = layoutHints(rel, content);
       return {
         ok: true,
         touched,
-        text: `${existed ? "rewrote" : "created"} ${rel} (${touched.bytes} bytes, ${content.split("\n").length} lines)`,
+        text:
+          `${existed ? "rewrote" : "created"} ${rel} (${touched.bytes} bytes, ${content.split("\n").length} lines)` +
+          (problem ? `\nSYNTAX ERROR - the file is on disk but will not compile:\n${problem}\nFix it now with edit_file.` : "") +
+          (hints ? `\nLAYOUT WARNING - you cannot see the page, so check this before moving on:\n${hints}` : ""),
       };
     }
 
@@ -393,9 +434,30 @@ export async function runNative(
       if (!find) return { ok: false, text: "`find` cannot be empty" };
       const hits = before.split(find).length - 1;
       if (hits === 0) {
+        // Models copy code back with the indentation a little off far more often
+        // than they get the code itself wrong. Match line by line ignoring leading
+        // and trailing space, and if that finds exactly one place, that is the edit.
+        const loose = looseReplace(before, find, String(args.replace ?? ""));
+        if (loose.count === 1) {
+          fs.writeFileSync(full, loose.text, "utf8");
+          const touched: FileTouch = { path: rel, action: "edit", bytes: Buffer.byteLength(loose.text), ts: Date.now() };
+          announce(t, w, touched);
+          const problem = await syntaxCheck(rel, loose.text);
+          return {
+            ok: true,
+            touched,
+            text:
+              `edited ${rel} (matched ignoring indentation)` +
+              (problem ? `\nSYNTAX ERROR after this edit:\n${problem}\nFix it now.` : ""),
+          };
+        }
         return {
           ok: false,
-          text: `that exact text is not in ${rel}. read_file it again and copy the text as it actually is.`,
+          text:
+            loose.count > 1
+              ? `that text (ignoring indentation) appears ${loose.count} times in ${rel} - include more surrounding lines`
+              : `that text is not in ${rel}, even ignoring indentation. read_file the lines you want to change and copy ` +
+                "them exactly - or, for a large change, write_file the whole file.",
         };
       }
       if (hits > 1) {
@@ -408,7 +470,12 @@ export async function runNative(
       fs.writeFileSync(full, after, "utf8");
       const touched: FileTouch = { path: rel, action: "edit", bytes: Buffer.byteLength(after), ts: Date.now() };
       announce(t, w, touched);
-      return { ok: true, touched, text: `edited ${rel}` };
+      const problem = await syntaxCheck(rel, after);
+      return {
+        ok: true,
+        touched,
+        text: `edited ${rel}` + (problem ? `\nSYNTAX ERROR after this edit:\n${problem}\nFix it now.` : ""),
+      };
     }
 
     case "run": {
@@ -422,6 +489,35 @@ export async function runNative(
     default:
       return { ok: false, text: `no such tool: ${name}` };
   }
+}
+
+/**
+ * Find `find` in `text` comparing whole lines with surrounding whitespace
+ * ignored, and replace the matched lines. Blank lines at either end of `find`
+ * do not count. Returns how many places matched; the text is only replaced
+ * when that is exactly one.
+ */
+export function looseReplace(text: string, find: string, replace: string): { count: number; text: string } {
+  const lines = text.split("\n");
+  const want = find.split("\n").map((l) => l.trim());
+  while (want.length && !want[0]) want.shift();
+  while (want.length && !want[want.length - 1]) want.pop();
+  if (!want.length) return { count: 0, text };
+  const starts: number[] = [];
+  for (let i = 0; i + want.length <= lines.length; i++) {
+    let ok = true;
+    for (let j = 0; j < want.length; j++) {
+      if (lines[i + j].trim() !== want[j]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) starts.push(i);
+  }
+  if (starts.length !== 1) return { count: starts.length, text };
+  const at = starts[0];
+  const next = [...lines.slice(0, at), ...replace.replace(/\n$/, "").split("\n"), ...lines.slice(at + want.length)];
+  return { count: 1, text: next.join("\n") };
 }
 
 function notYours(t: Task, rel: string): string {
@@ -443,7 +539,164 @@ function announce(t: Task, w: Worker, touched: FileTouch) {
   store.touch();
 }
 
+/** Plain-text search, capped. Good enough for "where is this defined". */
+function search(root: string, query: string, sub: string): string {
+  const start = inside(root, sub === "." ? "." : sub);
+  const needle = query.toLowerCase();
+  const hits: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    if (hits.length >= 60 || depth > 8) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (hits.length >= 60) return;
+      if (e.name.startsWith(".") || SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full, depth + 1);
+        continue;
+      }
+      if (/\.(png|jpe?g|gif|webp|ico|woff2?|ttf|lock|zip|pdf|mp[34])$/i.test(e.name) || e.name === "package-lock.json") continue;
+      let body: string;
+      try {
+        if (fs.statSync(full).size > 400_000) continue;
+        body = fs.readFileSync(full, "utf8");
+      } catch {
+        continue;
+      }
+      const rel = path.relative(root, full).split(path.sep).join("/");
+      body.split("\n").forEach((line, i) => {
+        if (hits.length < 60 && line.toLowerCase().includes(needle)) hits.push(`${rel}:${i + 1}: ${line.trim().slice(0, 160)}`);
+      });
+    }
+  };
+  if (fs.statSync(start).isDirectory()) walk(start, 0);
+  return hits.length ? `${hits.length}${hits.length >= 60 ? "+" : ""} matches\n${hits.join("\n")}` : `no matches for "${query}"`;
+}
+
+const LOADERS: Record<string, "ts" | "tsx" | "js" | "jsx"> = {
+  ".ts": "ts", ".mts": "ts", ".tsx": "tsx", ".js": "js", ".mjs": "js", ".cjs": "js", ".jsx": "jsx",
+};
+
+/**
+ * Parse the file the way the bundler will, right after it is written. A cheap
+ * model that leaves an unclosed JSX tag finds out in the same round, while the
+ * file is still in its head - not twenty minutes later from a failing build.
+ */
+export async function syntaxCheck(rel: string, content: string): Promise<string | null> {
+  const ext = path.extname(rel).toLowerCase();
+  if (ext === ".json") {
+    try {
+      JSON.parse(content);
+      return null;
+    } catch (err: any) {
+      return `JSON: ${err?.message ?? err}`;
+    }
+  }
+  const loader = LOADERS[ext];
+  if (!loader) return null;
+  try {
+    await transform(content, { loader, jsx: "automatic", format: "esm", logLevel: "silent" });
+    return null;
+  } catch (err: any) {
+    const errors: any[] = err?.errors ?? [];
+    if (!errors.length) return String(err?.message ?? err).slice(0, 400);
+    return errors
+      .slice(0, 4)
+      .map((e) => {
+        const loc = e.location;
+        const where = `${rel}:${loc?.line ?? "?"}:${loc?.column ?? "?"}`;
+        return `${where} ${e.text}${loc?.lineText ? `\n    ${String(loc.lineText).trim().slice(0, 160)}` : ""}`;
+      })
+      .join("\n");
+  }
+}
+
+/**
+ * Layout mistakes a desk cannot see, because it never sees the page. Kept to
+ * the ones that are nearly always bugs, so a warning is worth a round of
+ * attention: an absolutely positioned element with nothing positioned to hold
+ * it lands against some ancestor far up the page, over someone else's section.
+ */
+export function layoutHints(rel: string, content: string): string | null {
+  if (!/\.(tsx|jsx)$/.test(rel)) return null;
+  const classes = (content.match(/className=(?:"[^"]*"|\{`[^`]*`\}|'[^']*')/g) ?? []).join(" ");
+  const has = (word: string) => new RegExp(`(^|[\\s"'\`:{])${word}(?=$|[\\s"'\`])`).test(classes);
+  const out: string[] = [];
+  if (has("absolute") && !has("relative") && !has("fixed") && !has("sticky")) {
+    out.push(
+      `- ${rel} positions elements with "absolute" but nothing in it is "relative", so they will be placed against ` +
+        'an ancestor far up the page and overlap other sections. Put "relative" on the element that should contain them.',
+    );
+  }
+  return out.length ? out.join("\n") : null;
+}
+
+/**
+ * The type check, narrowed to one desk. Several desks write one project at
+ * once, so the project as a whole will not compile until the last of them
+ * lands - a whole-project error list would bury a desk in other people's
+ * half-written files. What a desk is shown is what is wrong in the files it
+ * owns, plus anything a teammate's file says about its exports. A missing
+ * module that another desk is still writing is not an error yet.
+ */
+export async function deskCheck(
+  t: Task,
+  command: string,
+  othersClaim: string[],
+): Promise<{ ok: boolean; report: string }> {
+  if (!t.workspace) return { ok: true, report: "" };
+  const root = t.workspace;
+  const res = await shell(command, root);
+  if (res.ok) return { ok: true, report: "" };
+  const stillComing = (spec: string) => {
+    const tail = spec.replace(/^(\.\.?\/)+/, "");
+    return othersClaim.some((c) => {
+      const base = c.replace(/\.(tsx?|jsx?|css)$/, "");
+      return base.endsWith(tail) && !fs.existsSync(path.join(root, c));
+    });
+  };
+  const myNames = t.claims
+    .filter((c) => c !== "**")
+    .map((c) => path.basename(c).replace(/\.(tsx?|jsx?)$/, ""))
+    .filter(Boolean);
+  const lines = res.text.split(/\r?\n/);
+  const own: string[] = [];
+  const about: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/);
+    if (!m) continue;
+    const rel = m[1].replace(/\\/g, "/").replace(/^\.\//, "");
+    let msg = m[5];
+    // tsc continues a long message on indented lines
+    while (i + 1 < lines.length && /^\s{2,}\S/.test(lines[i + 1])) msg += ` ${lines[++i].trim()}`;
+    const missing = msg.match(/Cannot find module '([^']+)'/);
+    if (missing && stillComing(missing[1])) continue;
+    const line = `${rel}:${m[2]}:${m[3]} ${m[4]} ${msg}`;
+    if (owns(t.claims, rel)) own.push(line);
+    else if (myNames.some((n) => msg.includes(`/${n}'`) || msg.includes(`/${n}"`))) about.push(line);
+  }
+  if (!own.length && !about.length) return { ok: true, report: "" };
+  const parts: string[] = [];
+  if (own.length) parts.push(`Type errors in your files:\n${own.slice(0, 25).join("\n")}`);
+  if (about.length) {
+    parts.push(
+      `A teammate's file cannot use what yours exports:\n${about.slice(0, 10).join("\n")}\n` +
+        "Match the export names and props in the contract exactly.",
+    );
+  }
+  return { ok: false, report: parts.join("\n\n") };
+}
+
 // ---- the shell -------------------------------------------------------
+
+/** Commands that never exit on their own. */
+const SERVERS =
+  /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start|serve|preview|watch)\b|^\s*(npx\s+)?(vite|nodemon|live-server|http-server|serve)\s*$|^\s*(npx\s+)?vite\s+(dev|serve|preview)\b|\s--watch\b|\btsx\s+watch\b/i;
 
 export interface ShellCheck {
   ok: boolean;
@@ -463,6 +716,10 @@ export function checkCommand(raw: string): ShellCheck {
       ok: false,
       reason: "pipes, redirects, backgrounding and subshells are not allowed - run one command at a time",
     };
+  }
+  // a server never exits, so the desk would sit on a three-minute timeout for nothing
+  if (SERVERS.test(line)) {
+    return { ok: false, reason: "servers and watchers never exit - run `npm run build` or the tests instead" };
   }
   const extra = new Set((store.state.settings.shellExtra ?? []).map((s) => s.toLowerCase()));
   for (const segment of line.split("&&")) {
@@ -534,6 +791,27 @@ export function shell(command: string, root: string, w?: Worker, t?: Task): Prom
           text:
             (killed ? `timed out after ${Math.round(RUN_TIMEOUT_MS / 1000)}s\n` : "") +
             `exit ${code ?? "killed"} in ${ms}ms\n${text || "(no output)"}`,
+        });
+      },
+    );
+  });
+}
+
+/** `npm install` for a freshly laid stack. Slow the first time, so it gets its own clock. */
+export function install(root: string): Promise<ShellResult> {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    execFile(
+      "npm install --no-audit --no-fund --loglevel=error",
+      [],
+      { cwd: root, shell: true, timeout: 600_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      (err: any, stdout: string, stderr: string) => {
+        const text = [stdout, stderr].filter(Boolean).join("\n").trim().slice(-3000);
+        resolve({
+          ok: !err,
+          code: err ? (typeof err.code === "number" ? err.code : 1) : 0,
+          ms: Date.now() - started,
+          text: text || "(no output)",
         });
       },
     );

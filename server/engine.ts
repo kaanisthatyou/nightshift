@@ -390,6 +390,7 @@ function shortSay(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case "list_files": return "klasore bakiyorum...";
     case "read_file": return file ? `${file} okuyorum` : "okuyorum...";
+    case "search_files": return `"${String(args.query ?? "").slice(0, 24)}" ariyorum`;
     case "write_file": return file ? `${file} yaziyorum` : "yaziyorum...";
     case "edit_file": return file ? `${file} duzeltiyorum` : "duzeltiyorum...";
     case "run": return `$ ${String(args.command ?? "").slice(0, 40)}`;
