@@ -345,6 +345,26 @@ export interface GatewayStatus {
   routes: RouteInfo[];
 }
 
+/**
+ * The office itself. Desks are grouped into rooms, each room drawn as its own
+ * space on the floor, so a crew of three and a crew of thirty-two both look
+ * like somewhere people work.
+ */
+export type RoomTheme = "night" | "loft" | "lab" | "garden" | "arcade";
+
+export interface RoomConfig {
+  id: string;
+  name: string;
+  /** 1..8 - a room is two rows of four */
+  desks: number;
+  theme: RoomTheme;
+}
+
+export interface OfficeConfig {
+  name: string;
+  rooms: RoomConfig[];
+}
+
 export interface FloorEvent {
   id: string;
   ts: number;
@@ -430,6 +450,8 @@ export interface FloorState {
     routerFallback: boolean;
     /** how long models may think before writing, unless a desk says otherwise */
     reasoning: import("./providers.ts").ReasoningLevel;
+    /** rooms and desks */
+    office: OfficeConfig;
   };
 }
 

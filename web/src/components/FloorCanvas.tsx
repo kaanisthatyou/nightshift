@@ -1,3 +1,4 @@
+import { deskCount } from "../../../shared/office.ts";
 import { useEffect, useRef, useState } from "react";
 import { FloorScene } from "../pixel/scene.ts";
 import { onFloorEvent, post, useFloor } from "../store.ts";
@@ -87,7 +88,8 @@ export default function FloorCanvas() {
     <div className="stage">
       <canvas ref={ref} className="floor" />
       <div className="stage-tag">
-        FLOOR 13 // {workers} desks staffed // {busy} working
+        {(state?.settings.office?.name ?? "floor 13").toUpperCase()} // {workers}/{deskCount(state?.settings.office)} desks
+        staffed // {busy} working
         {state && !state.gateway.online ? " // GHOST SHIFT" : ""}
       </div>
       <div className="camera">

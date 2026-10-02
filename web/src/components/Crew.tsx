@@ -10,6 +10,7 @@ import Portrait from "./Portrait.tsx";
 import ModelSelect from "./ModelSelect.tsx";
 import type { RoleSpec } from "../../../shared/presets.ts";
 import type { Worker } from "../../../shared/types.ts";
+import { deskCount } from "../../../shared/office.ts";
 
 const fmtCost = (c: number) => (c === 0 ? "$0" : c < 0.001 ? `$${c.toFixed(6)}` : `$${c.toFixed(4)}`);
 const fmtMs = (ms: number) => (ms > 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
@@ -234,7 +235,7 @@ function Loadout() {
   return (
     <div className="file form">
       <div className="form-title">
-        loadout <span className="form-no">{workers.length}/8 desks</span>
+        loadout <span className="form-no">{workers.length}/{deskCount(state?.settings.office)} desks</span>
       </div>
 
       <label className="form-line">

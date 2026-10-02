@@ -9,6 +9,7 @@ import type {
 } from "../shared/types.ts";
 import { buildPersona, roleSpec, TEMPERS } from "../shared/presets.ts";
 import { makeName, makeTitle } from "./flavor.ts";
+import { DEFAULT_OFFICE, deskCount, normaliseOffice } from "../shared/office.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const INSTALL_DATA = path.resolve(__dirname, "..", "data");
@@ -41,7 +42,8 @@ function chooseDataDir(): string {
 export const DATA_DIR = chooseDataDir();
 const STATE_FILE = path.join(DATA_DIR, "floor.json");
 
-export const DESK_COUNT = 8;
+/** How many desks the office has right now. Rooms decide it, not a constant. */
+export const deskTotal = () => deskCount(store.state.settings.office);
 
 function blankState(): FloorState {
   return {
@@ -81,6 +83,7 @@ function blankState(): FloorState {
       repairRounds: 2,
       routerFallback: true,
       reasoning: "low",
+      office: structuredClone(DEFAULT_OFFICE),
     },
   };
 }
@@ -134,6 +137,17 @@ class Store extends EventEmitter {
         // four in flight because a burst was expensive to recover from. It is not
         // any more, so a floor still sitting on that old ceiling is opened up.
         if (raw?.settings?.maxParallel === 4 || raw?.settings?.maxParallel === 8) this.state.settings.maxParallel = 32;
+        this.state.settings.office = normaliseOffice(this.state.settings.office);
+        // a desk hired onto a bigger office than the one it is in now still needs a chair
+        if (this.state.workers.some((w) => w.desk >= deskCount(this.state.settings.office))) {
+          const need = Math.max(...this.state.workers.map((w) => w.desk)) + 1;
+          const rooms = this.state.settings.office.rooms;
+          while (deskCount(this.state.settings.office) < need && rooms.length < 8) {
+            const last = rooms[rooms.length - 1];
+            if (last.desks < 8) last.desks = Math.min(8, last.desks + (need - deskCount(this.state.settings.office)));
+            else rooms.push({ id: `r${rooms.length + 1}`, name: `room ${rooms.length + 1}`, desks: 8, theme: "night" });
+          }
+        }
         // models written as gateway ids (`auto/best-free`, `oc/...`) meant nothing
         // without the gateway - the auto route is the honest replacement
         for (const w of this.state.workers) {
@@ -210,7 +224,7 @@ class Store extends EventEmitter {
 
   freeDesk(): number {
     const used = new Set(this.state.workers.map((w) => w.desk));
-    for (let i = 0; i < DESK_COUNT; i++) if (!used.has(i)) return i;
+    for (let i = 0; i < deskTotal(); i++) if (!used.has(i)) return i;
     return -1;
   }
 

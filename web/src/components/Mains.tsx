@@ -1,11 +1,12 @@
-// The mains: where the models come from and how their quotas are pooled. There
-// is no gateway to connect to - the floor talks to every provider itself, one
-// lane per key.
-import { useEffect, useState } from "react";
+// The mains: where the models come from, how their quotas are pooled, and what
+// the office looks like. There is no gateway to connect to - the floor talks to
+// every provider itself, one lane per key.
+import { useEffect, useMemo, useState } from "react";
 import { del, post, useFloor } from "../store.ts";
 import ModelSelect from "./ModelSelect.tsx";
+import { OFFICE_LAYOUTS, ROOM_THEMES, DESKS_PER_ROOM, MAX_ROOMS, deskCount } from "../../../shared/office.ts";
 import { PROVIDER_PRESETS } from "../../../shared/providers.ts";
-import type { LaneStatus, ModelInfo, ProviderStatus } from "../../../shared/types.ts";
+import type { LaneStatus, ModelInfo, OfficeConfig, ProviderStatus, RoomConfig } from "../../../shared/types.ts";
 
 const NO_ROUTES: import("../../../shared/types.ts").RouteInfo[] = [];
 
@@ -259,6 +260,117 @@ function RoutesPanel() {
   );
 }
 
+function RoomRow({ room, index, onChange, onRemove }: {
+  room: RoomConfig;
+  index: number;
+  onChange: (r: RoomConfig) => void;
+  onRemove: (() => void) | null;
+}) {
+  return (
+    <div className={`room-row theme-${room.theme}`}>
+      <span className="room-no">{index + 1}</span>
+      <input className="grow" value={room.name} onChange={(e) => onChange({ ...room, name: e.target.value })} />
+      <select value={room.theme} onChange={(e) => onChange({ ...room, theme: e.target.value as RoomConfig["theme"] })}>
+        {ROOM_THEMES.map((t) => (
+          <option key={t.id} value={t.id} title={t.blurb}>{t.name}</option>
+        ))}
+      </select>
+      <span className="desk-dots">
+        {Array.from({ length: DESKS_PER_ROOM }, (_, i) => (
+          <i key={i} className={i < room.desks ? "taken" : ""} style={{ cursor: "pointer" }} onClick={() => onChange({ ...room, desks: i + 1 })} />
+        ))}
+      </span>
+      {onRemove && <button className="btn mini" onClick={onRemove}>x</button>}
+    </div>
+  );
+}
+
+function OfficePanel() {
+  const office = useFloor((s) => s.state?.settings.office);
+  const crew = useFloor((s) => s.state?.workers.length ?? 0);
+  const [draft, setDraft] = useState<OfficeConfig | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const shown = draft ?? office;
+  const total = deskCount(shown);
+  const dirty = useMemo(() => draft && JSON.stringify(draft) !== JSON.stringify(office), [draft, office]);
+
+  if (!shown) return null;
+
+  async function apply(body: unknown) {
+    setErr(null);
+    try {
+      await post("/office", body);
+      setDraft(null);
+    } catch (e: any) {
+      try {
+        setErr(JSON.parse(e.message).error);
+      } catch {
+        setErr(e.message);
+      }
+    }
+  }
+
+  const edit = (fn: (o: OfficeConfig) => OfficeConfig) => setDraft(fn(structuredClone(shown)));
+
+  return (
+    <div className="file">
+      <div className="form-title">
+        the office <span className="form-no">{shown.rooms.length} rooms · {total} desks · {crew} hired</span>
+      </div>
+      <div className="row" style={{ flexWrap: "wrap", marginBottom: 6 }}>
+        {OFFICE_LAYOUTS.map((l) => (
+          <button key={l.id} className="btn mini" title={l.blurb} onClick={() => void apply({ layout: l.id })}>
+            {l.name} · {deskCount(l.office)}
+          </button>
+        ))}
+      </div>
+      <input
+        style={{ width: "100%", marginBottom: 4 }}
+        value={shown.name}
+        onChange={(e) => edit((o) => ({ ...o, name: e.target.value }))}
+      />
+      {shown.rooms.map((r, i) => (
+        <RoomRow
+          key={r.id}
+          room={r}
+          index={i}
+          onChange={(next) => edit((o) => ({ ...o, rooms: o.rooms.map((x, j) => (j === i ? next : x)) }))}
+          onRemove={shown.rooms.length > 1 ? () => edit((o) => ({ ...o, rooms: o.rooms.filter((_, j) => j !== i) })) : null}
+        />
+      ))}
+      <div className="row" style={{ marginTop: 4 }}>
+        <button
+          className="btn mini"
+          disabled={shown.rooms.length >= MAX_ROOMS}
+          onClick={() =>
+            edit((o) => ({
+              ...o,
+              rooms: [
+                ...o.rooms,
+                {
+                  id: `r${Date.now().toString(36)}`,
+                  name: `room ${o.rooms.length + 1}`,
+                  desks: DESKS_PER_ROOM,
+                  theme: ROOM_THEMES[o.rooms.length % ROOM_THEMES.length].id,
+                },
+              ],
+            }))
+          }
+        >
+          + room
+        </button>
+        <span className="grow sub bad-text">{err}</span>
+        {dirty && (
+          <>
+            <button className="btn mini" onClick={() => setDraft(null)}>undo</button>
+            <button className="btn mini primary" onClick={() => void apply({ office: draft })}>rebuild</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function HouseRules() {
   const state = useFloor((s) => s.state);
   const s = state?.settings;
@@ -347,6 +459,7 @@ export default function Mains() {
     <>
       <ProvidersPanel />
       <RoutesPanel />
+      <OfficePanel />
       <HouseRules />
       <Catalog />
     </>

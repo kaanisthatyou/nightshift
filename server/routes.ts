@@ -1,7 +1,8 @@
 // REST surface. The window uses it, and so does Claude when it plays boss.
 import { Router } from "express";
-import { DESK_COUNT, blankStep, id, store } from "./store.ts";
+import { blankStep, deskTotal, id, store } from "./store.ts";
 import { dispatch, gateway, syncRouter, wake } from "./engine.ts";
+import { OFFICE_LAYOUTS, ROOM_THEMES, deskCount, normaliseOffice } from "../shared/office.ts";
 import { PROVIDER_PRESETS } from "../shared/providers.ts";
 import { BOSS_LINES, pick } from "./flavor.ts";
 import { fireHappening, happeningKinds } from "./nightlife.ts";
@@ -106,6 +107,46 @@ api.delete("/routes/:id", (req, res) => {
   res.status(ok ? 200 : 404).json({ ok, gateway: store.state.gateway });
 });
 
+// ---- the office -----------------------------------------------------
+
+api.get("/office", (_req, res) => {
+  res.json({ office: store.state.settings.office, layouts: OFFICE_LAYOUTS, themes: ROOM_THEMES, desks: deskTotal() });
+});
+
+/**
+ * Rebuild the office: pass a layout id, or a whole `{ name, rooms }`. Nobody is
+ * fired to make it fit - an office smaller than the crew is refused, and desks
+ * that no longer exist are moved to free ones in the new floor plan.
+ */
+api.post("/office", (req, res) => {
+  const b = req.body ?? {};
+  // `{kind}` is the older meaning of this route - make something happen on the floor
+  if (typeof b.kind === "string" && !b.layout && !b.office && !b.rooms) return happening(req, res);
+  const layout = OFFICE_LAYOUTS.find((l) => l.id === b.layout);
+  const next = layout ? structuredClone(layout.office) : normaliseOffice(b.office ?? b);
+  const total = deskCount(next);
+  const crew = store.state.workers;
+  if (crew.length > total) {
+    return res.status(409).json({ error: `${crew.length} people work here and that office has ${total} desks - fire someone first` });
+  }
+  store.state.settings.office = next;
+  const used = new Set(crew.filter((w) => w.desk < total).map((w) => w.desk));
+  for (const w of crew) {
+    if (w.desk < total) continue;
+    let d = 0;
+    while (used.has(d)) d++;
+    w.desk = d;
+    used.add(d);
+  }
+  store.emitEvent({
+    type: "office",
+    text: `ofis yeniden kuruldu: ${next.name} - ${next.rooms.length} oda, ${total} masa`,
+    data: { kind: "rebuild", rooms: next.rooms.length, desks: total },
+  });
+  store.touch();
+  res.json({ office: next, desks: total });
+});
+
 api.post("/settings", (req, res) => {
   const s = store.state.settings;
   const b = req.body ?? {};
@@ -153,7 +194,7 @@ api.post("/workers", (req, res) => {
     temper: b.temper ?? null,
     persona: b.persona ?? null,
   });
-  if (!w) return res.status(409).json({ error: "no free desks - fire someone first" });
+  if (!w) return res.status(409).json({ error: "no free desks - add a room in the office panel, or fire someone" });
   res.json({ worker: w });
 });
 
@@ -218,7 +259,7 @@ api.delete("/workers/:id", (req, res) => {
 // ---- loadouts --------------------------------------------------------
 
 api.get("/presets", (_req, res) => {
-  res.json({ presets: PRESETS, tempers: TEMPERS, desks: DESK_COUNT });
+  res.json({ presets: PRESETS, tempers: TEMPERS, desks: deskTotal() });
 });
 
 /**
@@ -251,7 +292,7 @@ api.post("/presets/:id/hire", (req, res) => {
     else skipped.push(key);
   }
   if (!hired.length && skipped.length) {
-    return res.status(409).json({ error: "no free desks - fire someone first", skipped });
+    return res.status(409).json({ error: "no free desks - add a room in the office panel, or fire someone", skipped });
   }
   store.emitEvent({
     type: "boss.say",
@@ -969,11 +1010,12 @@ api.post("/boss/say", (req, res) => {
 api.get("/log", (_req, res) => res.json({ log: store.log.slice(-200) }));
 
 /** Make something happen on the floor on purpose. */
-api.post("/office", (req, res) => {
+function happening(req: any, res: any) {
   const kind = String(req.body?.kind ?? "");
   if (!happeningKinds().includes(kind)) {
     return res.status(400).json({ error: `unknown happening - try one of: ${happeningKinds().join(", ")}` });
   }
   const ok = fireHappening(kind);
   res.status(ok ? 200 : 409).json({ ok, kinds: happeningKinds() });
-});
+}
+api.post("/happening", happening);

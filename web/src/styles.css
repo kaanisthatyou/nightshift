@@ -469,6 +469,16 @@ canvas.floor {
 .route { border-left: 2px solid var(--line); padding-left: 6px; margin-bottom: 8px; }
 .route-step { font-size: 11px; gap: 4px; }
 .seg { display: flex; gap: 3px; flex-wrap: wrap; }
+.room-row { display: flex; align-items: center; gap: 5px; margin-bottom: 4px; padding: 3px 4px; border-left: 3px solid var(--line); }
+.room-row input { min-width: 0; }
+.room-row select { width: 104px; }
+.room-row .desk-dots { flex: none; }
+.room-no { width: 12px; color: var(--dim); font-size: 10px; }
+.room-row.theme-night { border-left-color: #3b4f9a; }
+.room-row.theme-loft { border-left-color: #b0703a; }
+.room-row.theme-lab { border-left-color: #8fb3c4; }
+.room-row.theme-garden { border-left-color: #4f9a5a; }
+.room-row.theme-arcade { border-left-color: #b04fd0; }
 
 /* ---- (legacy) combo rows ---- */
 .combo-row {

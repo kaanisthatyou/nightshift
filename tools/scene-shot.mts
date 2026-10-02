@@ -7,7 +7,8 @@ import { installDom, makeCanvas, Canvas } from "./canvas-shim.mts";
 
 const clock = installDom();
 
-const { FloorScene, VW, VH } = await import("../web/src/pixel/scene.ts");
+const { FloorScene, VW, VH, officeSize } = await import("../web/src/pixel/scene.ts");
+const { OFFICE_LAYOUTS } = await import("../shared/office.ts");
 const types = await import("../shared/types.ts");
 void types;
 
@@ -92,5 +93,40 @@ function closeUp(file: string, wx: number, wy: number, ww: number, wh: number, z
 closeUp("window.png", 128, 1, 120, 60, 6);
 closeUp("desk.png", 18, 56, 120, 76, 8);
 closeUp("boss.png", 264, 160, 100, 76, 8);
+
+// the whole office, for a layout with more than one room
+{
+  const layout = OFFICE_LAYOUTS.find((l) => l.id === (process.env.OFFICE ?? "agency")) ?? OFFICE_LAYOUTS[3];
+  const total = layout.office.rooms.reduce((n, r) => n + r.desks, 0);
+  const crew = Array.from({ length: total - 3 }, (_, i) => ({
+    ...workers[i % workers.length],
+    id: `o_${i}`,
+    name: NAMES[i % NAMES.length],
+    desk: i,
+    seed: 4242 + i * 7919,
+    state: STATES[i % STATES.length],
+  }));
+  const probe = new FloorScene(makeCanvas(8, 8) as unknown as HTMLCanvasElement) as unknown as { sync(s: unknown): void };
+  const state = {
+    workers: crew, tasks: [], jobs: [],
+    gateway: { online: true, modelCount: 0, lastCheck: 0, error: null, providers: [], routes: [] },
+    ledger: { costUsd: 0, tokensIn: 0, tokensOut: 0, tasksDone: 0, tasksFailed: 0, shiftStartedAt: 0 },
+    settings: { autoAssign: true, ghostMode: false, maxParallel: 4, defaultModel: "auto", office: layout.office },
+  };
+  probe.sync(state);
+  const size = officeSize();
+  const Z = 2;
+  const c = makeCanvas(size.w * Z, size.h * Z) as unknown as Canvas;
+  const sc = new FloorScene(c as unknown as HTMLCanvasElement) as unknown as {
+    update(dt: number): void; draw(): void; t: number; storm: number; sync(s: unknown): void; fit(): void;
+  };
+  sc.sync(state);
+  sc.fit();
+  for (let i = 0; i < 6 / STEP; i++) { sc.t += STEP; sc.update(STEP); }
+  sc.storm = 0;
+  sc.draw();
+  fs.writeFileSync(path.join(outDir, "office.png"), encodePNG(c.width, c.height, c.data));
+  console.log(`wrote office.png (${layout.id}, ${c.width}x${c.height})`);
+}
 
 console.log(`wrote scene.png (${canvas.width}x${canvas.height}), window.png, desk.png, boss.png`);

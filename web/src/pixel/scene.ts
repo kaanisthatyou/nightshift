@@ -2,7 +2,8 @@
 // The room is a fixed 360x240 patch of world; the camera decides how much of the
 // office around it you see. Everything renders into a virtual-pixel buffer, then
 // gets blown up with smoothing off so it stays honest pixels.
-import type { FloorEvent, FloorState, Worker } from "../../../shared/types.ts";
+import type { FloorEvent, FloorState, OfficeConfig, RoomTheme, Worker } from "../../../shared/types.ts";
+import { DEFAULT_OFFICE, deskCount, deskInRoom } from "../../../shared/office.ts";
 import {
   PROPS, makeBossSkin, makeWorkerSkin,
   MONITOR_SCREEN, RACK_LEDS, RACK_PLATE, TRAY_PLATE, COOLER_WATER,
@@ -13,7 +14,7 @@ import {
 export const VW = 360;
 export const VH = 240;
 
-export const MIN_ZOOM = 2;
+export const MIN_ZOOM = 1;
 export const MAX_ZOOM = 8;
 /** how far past the room edge the camera may wander */
 const PAN_MARGIN = 90;
@@ -41,13 +42,58 @@ const WINDOWS = [
 /** desk clutter, one per worker, picked from their seed */
 const CLUTTER = ["books", "succulent", "papers", "duck"] as const;
 
-export interface DeskPos { cx: number; dy: number; row: number; col: number }
+export interface DeskPos { cx: number; dy: number; row: number; col: number; room: number }
+
+// ---- the office: rooms on a grid, joined by hallways ----------------------
+
+/** the gap between two rooms - wide enough to read as a hallway */
+const GAP = 28;
+
+let OFFICE: OfficeConfig = DEFAULT_OFFICE;
+
+/** how many rooms sit side by side before the next row starts */
+function columns(n: number) {
+  return n <= 3 ? n : n === 4 ? 2 : n <= 6 ? 3 : 4;
+}
+
+export function roomOrigin(r: number) {
+  const c = Math.max(1, columns(OFFICE.rooms.length));
+  return { x: (r % c) * (VW + GAP), y: Math.floor(r / c) * (VH + GAP) };
+}
+
+/** the whole office, in world pixels */
+export function officeSize() {
+  const n = Math.max(1, OFFICE.rooms.length);
+  const c = columns(n);
+  const rows = Math.ceil(n / c);
+  return { w: c * VW + (c - 1) * GAP, h: rows * VH + (rows - 1) * GAP };
+}
 
 export function deskPos(i: number): DeskPos {
-  const row = Math.floor(i / 4);
-  const col = i % 4;
-  return { cx: DESK_X[col], dy: ROW_Y[Math.min(row, 1)], row, col };
+  const hit = deskInRoom(OFFICE, i) ?? { room: 0, slot: i % 8 };
+  const o = roomOrigin(hit.room);
+  const row = Math.floor(hit.slot / 4);
+  const col = hit.slot % 4;
+  return { cx: o.x + DESK_X[col], dy: o.y + ROW_Y[Math.min(row, 1)], row, col, room: hit.room };
 }
+
+/** which room a world point is in, counting half the hallway as the room's */
+function roomAt(x: number, y: number): number | null {
+  for (let r = 0; r < OFFICE.rooms.length; r++) {
+    const o = roomOrigin(r);
+    if (x >= o.x - GAP / 2 && x < o.x + VW + GAP / 2 && y >= o.y - GAP / 2 && y < o.y + VH + GAP / 2) return r;
+  }
+  return null;
+}
+
+/** what a theme does to a room: the wash over its floor and walls, and its sign */
+const THEME: Record<RoomTheme, { wash: string | null; alpha: number; sign: string }> = {
+  night: { wash: null, alpha: 0, sign: "#ff3d7f" },
+  loft: { wash: "#a0643a", alpha: 0.55, sign: "#ffb454" },
+  lab: { wash: "#4f7584", alpha: 0.45, sign: "#8fe3ff" },
+  garden: { wash: "#4f8a4f", alpha: 0.55, sign: "#6ee787" },
+  arcade: { wash: "#7a3aa0", alpha: 0.55, sign: "#d06bff" },
+};
 
 /** cheap deterministic noise — same pixel gets the same value every frame */
 function hash(n: number) {
@@ -203,7 +249,7 @@ export class FloorScene {
 
   private emptyDeskAt(wx: number, wy: number): number | null {
     const taken = new Set([...this.agents.values()].map((a) => a.worker.desk));
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < deskCount(OFFICE); i++) {
       if (taken.has(i)) continue;
       const p = deskPos(i);
       if (wx > p.cx - 20 && wx < p.cx + 20 && wy > p.dy - 32 && wy < p.dy + 20) return i;
@@ -319,10 +365,11 @@ export class FloorScene {
     const rect = this.canvas.getBoundingClientRect();
     const w = rect.width || VW * 3;
     const h = rect.height || VH * 3;
-    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.floor(Math.min(w / VW, h / VH))));
+    const size = officeSize();
+    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Math.floor(Math.min(w / size.w, h / size.h))));
     this.measure();
-    this.cam.x = (this.view.bw - VW) / 2;
-    this.cam.y = (this.view.bh - VH) / 2;
+    this.cam.x = (this.view.bw - size.w) / 2;
+    this.cam.y = (this.view.bh - size.h) / 2;
     this.userMoved = false;
     this.onZoom?.(this.zoom);
   }
@@ -361,14 +408,24 @@ export class FloorScene {
       if (lo > hi) return (buf - room) / 2; // viewport dwarfs the room: just centre it
       return Math.max(lo, Math.min(hi, cam));
     };
-    this.cam.x = Math.round(axis(this.cam.x, this.view.bw, VW));
-    this.cam.y = Math.round(axis(this.cam.y, this.view.bh, VH));
+    const size = officeSize();
+    this.cam.x = Math.round(axis(this.cam.x, this.view.bw, size.w));
+    this.cam.y = Math.round(axis(this.cam.y, this.view.bh, size.h));
   }
 
   // ---------------------------------------------------------------- sync
 
   sync(state: FloorState) {
     this.state = state;
+    const office = state.settings.office ?? DEFAULT_OFFICE;
+    if (JSON.stringify(office) !== JSON.stringify(OFFICE)) {
+      const grew = officeSize();
+      OFFICE = office;
+      const now = officeSize();
+      // a different floor plan: re-frame unless the user is steering the camera
+      if (grew.w !== now.w || grew.h !== now.h) this.userMoved = false;
+      this.themed.clear();
+    }
     const seen = new Set<string>();
     for (const w of state.workers) {
       seen.add(w.id);
@@ -474,6 +531,11 @@ export class FloorScene {
           this.cat.tx = p.cx + 14;
           this.cat.ty = p.dy + 6;
           this.cat.sitUntil = this.t + 30;
+        } else if (kind === "rebuild") {
+          for (let r = 0; r < OFFICE.rooms.length; r++) {
+            const o = roomOrigin(r);
+            this.puff(o.x + VW / 2, o.y + 120, "#ffb454", 14);
+          }
         } else if (kind === "promotion" || kind === "quit") {
           const desk = e.data?.desk as number | undefined;
           const p = deskPos(typeof desk === "number" ? desk : 0);
@@ -516,13 +578,20 @@ export class FloorScene {
 
   /** Route through the front corridor and a vertical lane. Looks deliberate. */
   private walkTo(x: number, y: number, then?: () => void) {
-    const lane = LANES.reduce((best, l) => (Math.abs(l - x) < Math.abs(best - x) ? l : best), LANES[0]);
-    this.queue = [
-      { x: this.boss.x, y: CORRIDOR },
-      { x: lane, y: CORRIDOR },
-      { x: lane, y },
-      { x, y, then },
-    ];
+    const from = roomAt(this.boss.x, this.boss.y) ?? 0;
+    const to = roomAt(x, y) ?? 0;
+    const a = roomOrigin(from);
+    const b = roomOrigin(to);
+    const lx = x - b.x;
+    const lane = b.x + LANES.reduce((best, l) => (Math.abs(l - lx) < Math.abs(best - lx) ? l : best), LANES[0]);
+    const path: WalkTarget[] = [{ x: this.boss.x, y: a.y + CORRIDOR }];
+    if (a.y !== b.y) {
+      // another row of rooms: down the hallway beside this room, then along theirs
+      const hall = a.x + VW + GAP / 2;
+      path.push({ x: hall, y: a.y + CORRIDOR }, { x: hall, y: b.y + CORRIDOR });
+    }
+    path.push({ x: lane, y: b.y + CORRIDOR }, { x: lane, y }, { x, y, then });
+    this.queue = path;
     this.boss.walking = true;
   }
 
@@ -1066,7 +1135,7 @@ export class FloorScene {
       ? 0.75 + 0.25 * Math.sin(this.t * 9) * (Math.sin(this.t * 1.7) > 0.9 ? 0 : 1)
       : (Math.sin(this.t * 22) > 0.6 ? 0.5 : 0.12);
     const color = online ? "#ff3d7f" : "#ff5c5c";
-    const label = online ? "NIGHTSHIFT" : "GATEWAY DOWN";
+    const label = online ? "NIGHTSHIFT" : "NO PROVIDER";
     g.save();
     g.globalAlpha = flicker;
     g.font = "8px Silkscreen, monospace";
@@ -1154,7 +1223,7 @@ export class FloorScene {
     g.font = "8px Silkscreen, monospace";
     g.textBaseline = "top";
     g.fillStyle = "#1b1405";
-    g.fillText("OMNI", RACK_AT.x + RACK_PLATE.x + 1, RACK_AT.y + RACK_PLATE.y - 4);
+    g.fillText("KEYS", RACK_AT.x + RACK_PLATE.x + 1, RACK_AT.y + RACK_PLATE.y - 4);
 
     // --- printer
     g.drawImage(PROPS.printer, PRINTER_AT.x, PRINTER_AT.y);
@@ -1501,8 +1570,9 @@ export class FloorScene {
   private draw() {
     this.measure();
     if (!this.userMoved) {
-      this.cam.x = Math.round((this.view.bw - VW) / 2);
-      this.cam.y = Math.round((this.view.bh - VH) / 2);
+      const size = officeSize();
+      this.cam.x = Math.round((this.view.bw - size.w) / 2);
+      this.cam.y = Math.round((this.view.bh - size.h) / 2);
     }
     this.clampCam();
 
@@ -1522,6 +1592,7 @@ export class FloorScene {
     if (wallTop < 58) this.paintWall(g, -this.cam.x, bw);
     // and the room itself sits on top of it
     if (this.bg) g.drawImage(this.bg, 0, 0);
+    this.washRoom(0);
 
     this.drawWindows();
     this.drawClock();
@@ -1556,13 +1627,22 @@ export class FloorScene {
     // desks: back row first so the front row overlaps correctly
     const byDesk = new Map<number, Agent>();
     for (const a of this.agents.values()) byDesk.set(a.worker.desk, a);
-    for (let i = 0; i < 8; i++) {
+    const bossRoom = roomAt(this.boss.x, this.boss.y);
+    const mainDesks = OFFICE.rooms[0]?.desks ?? 8;
+    for (let i = 0; i < mainDesks; i++) {
       const p = deskPos(i);
       this.drawDesk(p.cx, p.dy, byDesk.get(i) ?? null);
-      if (i === 3) this.drawBossIfBehind();
+      if (i === 3 && bossRoom === 0) this.drawBossIfBehind();
     }
+    if (bossRoom === 0 && (this.boss.y > ROW_Y[0] + 10 || mainDesks <= 4)) this.drawBoss();
 
-    if (this.boss.y > ROW_Y[0] + 10) this.drawBoss();
+    // the other rooms, each its own space down the hall
+    let base = mainDesks;
+    for (let r = 1; r < OFFICE.rooms.length; r++) {
+      this.drawAnnex(r, base, byDesk, bossRoom === r);
+      base += OFFICE.rooms[r].desks;
+    }
+    if (bossRoom === null) this.drawBoss();
 
     // papers in flight
     for (const p of this.papers) {
@@ -1676,5 +1756,90 @@ export class FloorScene {
 
   private drawBossIfBehind() {
     if (this.boss.y <= ROW_Y[0] + 10) this.drawBoss();
+  }
+
+  /** the theme's colour laid over a room's floor and walls - windows and props keep their own */
+  private washRoom(r: number) {
+    const room = OFFICE.rooms[r];
+    const theme = THEME[room?.theme ?? "night"];
+    if (!theme.wash) return;
+    const g = this.b;
+    const o = roomOrigin(r);
+    g.save();
+    g.globalCompositeOperation = "color";
+    g.globalAlpha = theme.alpha;
+    g.fillStyle = theme.wash;
+    g.fillRect(o.x, o.y, VW, VH);
+    g.restore();
+  }
+
+  /** rendered once per theme: the room shell, so a thirty-desk office does not repaint thirty rugs */
+  private themed = new Map<string, HTMLCanvasElement>();
+
+  /**
+   * A room past the first. Same bones as the main floor - wall, windows, rug,
+   * a sign with its name - but no boss desk, rack or IN tray: those live in
+   * room one, where the work comes back to.
+   */
+  private drawAnnex(r: number, firstDesk: number, byDesk: Map<number, Agent>, bossHere: boolean) {
+    const g = this.b;
+    const room = OFFICE.rooms[r];
+    const o = roomOrigin(r);
+    const theme = THEME[room.theme] ?? THEME.night;
+
+    // skip rooms the camera cannot see at all
+    const vx = -this.cam.x, vy = -this.cam.y;
+    if (o.x > vx + this.view.bw || o.x + VW < vx || o.y > vy + this.view.bh || o.y + VH < vy) return;
+
+    // hallway floor stripe and the doorway into it
+    g.fillStyle = "rgba(0,0,0,0.18)";
+    g.fillRect(o.x - GAP, o.y + CORRIDOR - 8, GAP, 18);
+
+    g.save();
+    g.translate(o.x, o.y);
+    this.paintWall(g, 0, VW);
+    if (this.bg) g.drawImage(this.bg, 0, 0);
+    g.restore();
+    this.washRoom(r);
+
+    g.save();
+    g.translate(o.x, o.y);
+    this.drawWindows();
+    g.drawImage(PROPS.corkboard, 3, 8);
+    g.drawImage(PROPS.whiteboard, 215, 4);
+    g.drawImage(PROPS.poster, 330, 4);
+    g.drawImage(PROPS.plant, 2, 168);
+    g.drawImage(PROPS.plant, 344, 152);
+    g.drawImage(PROPS.filing, 338, 86);
+    if (room.theme === "garden") {
+      g.drawImage(PROPS.plant, 20, 190);
+      g.drawImage(PROPS.plant, 320, 190);
+      g.drawImage(PROPS.plant, 150, 52);
+    }
+    if (room.theme === "lab") g.drawImage(PROPS.rack, RACK_AT.x, RACK_AT.y);
+    if (room.theme === "loft") g.drawImage(PROPS.coatRack, 342, 130);
+
+    // the room's name, in its own neon
+    const flicker = 0.78 + 0.22 * Math.sin(this.t * 7 + r * 1.9);
+    const label = room.name.toUpperCase().slice(0, 18);
+    g.font = "8px Silkscreen, monospace";
+    g.textBaseline = "top";
+    g.globalAlpha = flicker;
+    g.shadowColor = theme.sign;
+    g.shadowBlur = 6;
+    g.fillStyle = theme.sign;
+    const lw = g.measureText(label).width;
+    g.fillText(label, Math.round(VW / 2 - lw / 2), 40);
+    g.shadowBlur = 0;
+    g.globalAlpha = 1;
+    g.restore();
+
+    for (let slot = 0; slot < room.desks; slot++) {
+      const i = firstDesk + slot;
+      const p = deskPos(i);
+      this.drawDesk(p.cx, p.dy, byDesk.get(i) ?? null);
+      if (slot === 3 && bossHere && this.boss.y <= o.y + ROW_Y[0] + 10) this.drawBoss();
+    }
+    if (bossHere && (this.boss.y > o.y + ROW_Y[0] + 10 || room.desks <= 4)) this.drawBoss();
   }
 }
