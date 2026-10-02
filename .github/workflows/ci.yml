@@ -27,6 +27,13 @@ jobs:
       - name: the planner reads what models actually send
         run: npm run check:json
 
+      - name: the planner keeps what a plan has to survive
+        run: npm run check:plan
+
+      # no keys in CI: fake OpenAI-compatible servers on localhost stand in for providers
+      - name: the router pools quotas and carries a conversation across them
+        run: npm run check:router
+
       - name: build the window
         run: npm run build
 
