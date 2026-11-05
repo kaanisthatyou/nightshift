@@ -503,6 +503,12 @@ row of the wrong length, a character with no palette entry, and an asset that no
 More in [CONTRIBUTING.md](CONTRIBUTING.md), including the desk geometry contract every prop
 depends on.
 
+## Contributors
+
+The night shift so far. Every contributor gets a building; whoever pushed this month has the lights on, and the empty lots are waiting for your first pull request.
+
+<a href="https://byteland.dev/r/kaanisthatyou/nightshift?ref=readme"><img src="https://byteland.dev/street/kaanisthatyou/nightshift.svg" width="720" alt="nightshift contributors as a night street in Byteland"></a>
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
